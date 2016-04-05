@@ -1402,7 +1402,6 @@ ARMTargetLowering::getEffectiveCallingConv(CallingConv::ID CC,
     else
       return CallingConv::ARM_AAPCS;
   case CallingConv::Fast:
-  case CallingConv::Swift:
   case CallingConv::CXX_FAST_TLS:
     if (!Subtarget->isAAPCS_ABI()) {
       if (Subtarget->hasVFP2() && !Subtarget->isThumb1Only() && !isVarArg)
