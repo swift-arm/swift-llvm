@@ -1259,8 +1259,7 @@ void DAGCombiner::Run(CombineLevel AtLevel) {
   // changes of the root.
   HandleSDNode Dummy(DAG.getRoot());
 
-  // while the worklist isn't empty, find a node and
-  // try and combine it.
+  // While the worklist isn't empty, find a node and try to combine it.
   while (!WorklistMap.empty()) {
     SDNode *N;
     // The Worklist holds the SDNodes in order, but it may contain null entries.
@@ -1629,8 +1628,8 @@ SDValue DAGCombiner::visitMERGE_VALUES(SDNode *N) {
   return SDValue(N, 0);   // Return N so it doesn't get rechecked!
 }
 
-/// If \p N is a ContantSDNode with isOpaque() == false return it casted to a
-/// ContantSDNode pointer else nullptr.
+/// If \p N is a ConstantSDNode with isOpaque() == false return it casted to a
+/// ConstantSDNode pointer else nullptr.
 static ConstantSDNode *getAsNonOpaqueConstant(SDValue N) {
   ConstantSDNode *Const = dyn_cast<ConstantSDNode>(N);
   return Const != nullptr && !Const->isOpaque() ? Const : nullptr;

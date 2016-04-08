@@ -1377,6 +1377,18 @@ void SelectionDAGBuilder::visitRet(const ReturnInst &I) {
   SmallVector<ISD::OutputArg, 8> Outs;
   SmallVector<SDValue, 8> OutVals;
 
+  // Calls to @llvm.experimental.deoptimize don't generate a return value, so
+  // lower
+  //
+  //   %val = call <ty> @llvm.experimental.deoptimize()
+  //   ret <ty> %val
+  //
+  // differently.
+  if (I.getParent()->getTerminatingDeoptimizeCall()) {
+    LowerDeoptimizingReturn();
+    return;
+  }
+
   if (!FuncInfo.CanLowerReturn) {
     unsigned DemoteReg = FuncInfo.DemoteRegister;
     const Function *F = I.getParent()->getParent();
@@ -3891,7 +3903,7 @@ void SelectionDAGBuilder::visitFence(const FenceInst &I) {
   const TargetLowering &TLI = DAG.getTargetLoweringInfo();
   SDValue Ops[3];
   Ops[0] = getRoot();
-  Ops[1] = DAG.getConstant(I.getOrdering(), dl,
+  Ops[1] = DAG.getConstant((unsigned)I.getOrdering(), dl,
                            TLI.getPointerTy(DAG.getDataLayout()));
   Ops[2] = DAG.getConstant(I.getSynchScope(), dl,
                            TLI.getPointerTy(DAG.getDataLayout()));
@@ -7635,12 +7647,13 @@ TargetLowering::LowerCallTo(TargetLowering::CallLoweringInfo &CLI) const {
     return std::make_pair(SDValue(), SDValue());
   }
 
-  DEBUG(for (unsigned i = 0, e = CLI.Ins.size(); i != e; ++i) {
-          assert(InVals[i].getNode() &&
-                 "LowerCall emitted a null value!");
-          assert(EVT(CLI.Ins[i].VT) == InVals[i].getValueType() &&
-                 "LowerCall emitted a value with the wrong type!");
-        });
+#ifndef NDEBUG
+  for (unsigned i = 0, e = CLI.Ins.size(); i != e; ++i) {
+    assert(InVals[i].getNode() && "LowerCall emitted a null value!");
+    assert(EVT(CLI.Ins[i].VT) == InVals[i].getValueType() &&
+           "LowerCall emitted a value with the wrong type!");
+  }
+#endif
 
   SmallVector<SDValue, 4> ReturnValues;
   if (!CanLowerReturn) {

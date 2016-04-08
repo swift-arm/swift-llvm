@@ -577,6 +577,8 @@ ARMTargetLowering::ARMTargetLowering(const TargetMachine &TM,
     setOperationAction(ISD::CTPOP,      MVT::v4i32, Custom);
     setOperationAction(ISD::CTPOP,      MVT::v4i16, Custom);
     setOperationAction(ISD::CTPOP,      MVT::v8i16, Custom);
+    setOperationAction(ISD::CTPOP,      MVT::v1i64, Expand);
+    setOperationAction(ISD::CTPOP,      MVT::v2i64, Expand);
 
     // NEON does not have single instruction CTTZ for vectors.
     setOperationAction(ISD::CTTZ, MVT::v8i8, Custom);
@@ -841,14 +843,10 @@ ARMTargetLowering::ARMTargetLowering(const TargetMachine &TM,
     setOperationAction(ISD::DYNAMIC_STACKALLOC, MVT::i32, Expand);
 
   // ARMv6 Thumb1 (except for CPUs that support dmb / dsb) and earlier use
-  // the default expansion. If we are targeting a single threaded system,
-  // then set them all for expand so we can lower them later into their
-  // non-atomic form.
+  // the default expansion.
   InsertFencesForAtomic = false;
-  if (TM.Options.ThreadModel == ThreadModel::Single)
-    setOperationAction(ISD::ATOMIC_FENCE,   MVT::Other, Expand);
-  else if (Subtarget->hasAnyDataBarrier() && (!Subtarget->isThumb() ||
-                                              Subtarget->hasV8MBaselineOps())) {
+  if (Subtarget->hasAnyDataBarrier() &&
+      (!Subtarget->isThumb() || Subtarget->hasV8MBaselineOps())) {
     // ATOMIC_FENCE needs custom lowering; the others should have been expanded
     // to ldrex/strex loops already.
     setOperationAction(ISD::ATOMIC_FENCE,     MVT::Other, Custom);
@@ -2104,14 +2102,6 @@ ARMTargetLowering::IsEligibleForTailCallOptimization(SDValue Callee,
   MachineFunction &MF = DAG.getMachineFunction();
   const Function *CallerF = MF.getFunction();
   CallingConv::ID CallerCC = CallerF->getCallingConv();
-  bool CCMatch = CallerCC == CalleeCC;
-
-  // Disable tailcall for CXX_FAST_TLS when callee and caller have different
-  // calling conventions, given that CXX_FAST_TLS has a bigger CSR set.
-  if (!CCMatch &&
-      (CallerCC == CallingConv::CXX_FAST_TLS ||
-       CalleeCC == CallingConv::CXX_FAST_TLS))
-    return false;
 
   assert(Subtarget->supportsTailCall());
 
@@ -2155,6 +2145,13 @@ ARMTargetLowering::IsEligibleForTailCallOptimization(SDValue Callee,
                                   CCAssignFnForNode(CalleeCC, true, isVarArg),
                                   CCAssignFnForNode(CallerCC, true, isVarArg)))
     return false;
+  // The callee has to preserve all registers the caller needs to preserve.
+  if (CalleeCC != CallerCC) {
+    const ARMBaseRegisterInfo *TRI = Subtarget->getRegisterInfo();
+    if (!TRI->regmaskSubsetEqual(TRI->getCallPreservedMask(MF, CallerCC),
+                                 TRI->getCallPreservedMask(MF, CalleeCC)))
+      return false;
+  }
 
   // If Caller's vararg or byval argument has been split between registers and
   // stack, do not perform tail call, since part of the argument is in caller's
@@ -3014,7 +3011,7 @@ static SDValue LowerATOMIC_FENCE(SDValue Op, SelectionDAG &DAG,
   if (Subtarget->isMClass()) {
     // Only a full system barrier exists in the M-class architectures.
     Domain = ARM_MB::SY;
-  } else if (Subtarget->isSwift() && Ord == Release) {
+  } else if (Subtarget->isSwift() && Ord == AtomicOrdering::Release) {
     // Swift happens to implement ISHST barriers in a way that's compatible with
     // Release semantics but weaker than ISH so we'd be fools not to use
     // it. Beware: other processors probably don't!
@@ -6935,13 +6932,13 @@ void ARMTargetLowering::ExpandDIV_Windows(
 }
 
 static SDValue LowerAtomicLoadStore(SDValue Op, SelectionDAG &DAG) {
-  // Monotonic load/store is legal for all targets
-  if (cast<AtomicSDNode>(Op)->getOrdering() <= Monotonic)
-    return Op;
+  if (isStrongerThanMonotonic(cast<AtomicSDNode>(Op)->getOrdering()))
+    // Acquire/Release load/store is not legal for targets without a dmb or
+    // equivalent available.
+    return SDValue();
 
-  // Acquire/Release load/store is not legal for targets without a
-  // dmb or equivalent available.
-  return SDValue();
+  // Monotonic load/store is legal for all targets.
+  return Op;
 }
 
 static void ReplaceREADCYCLECOUNTER(SDNode *N,
@@ -12079,18 +12076,18 @@ Instruction* ARMTargetLowering::emitLeadingFence(IRBuilder<> &Builder,
                                          AtomicOrdering Ord, bool IsStore,
                                          bool IsLoad) const {
   switch (Ord) {
-  case NotAtomic:
-  case Unordered:
+  case AtomicOrdering::NotAtomic:
+  case AtomicOrdering::Unordered:
     llvm_unreachable("Invalid fence: unordered/non-atomic");
-  case Monotonic:
-  case Acquire:
+  case AtomicOrdering::Monotonic:
+  case AtomicOrdering::Acquire:
     return nullptr; // Nothing to do
-  case SequentiallyConsistent:
+  case AtomicOrdering::SequentiallyConsistent:
     if (!IsStore)
       return nullptr; // Nothing to do
     /*FALLTHROUGH*/
-  case Release:
-  case AcquireRelease:
+  case AtomicOrdering::Release:
+  case AtomicOrdering::AcquireRelease:
     if (Subtarget->isSwift())
       return makeDMB(Builder, ARM_MB::ISHST);
     // FIXME: add a comment with a link to documentation justifying this.
@@ -12104,15 +12101,15 @@ Instruction* ARMTargetLowering::emitTrailingFence(IRBuilder<> &Builder,
                                           AtomicOrdering Ord, bool IsStore,
                                           bool IsLoad) const {
   switch (Ord) {
-  case NotAtomic:
-  case Unordered:
+  case AtomicOrdering::NotAtomic:
+  case AtomicOrdering::Unordered:
     llvm_unreachable("Invalid fence: unordered/not-atomic");
-  case Monotonic:
-  case Release:
+  case AtomicOrdering::Monotonic:
+  case AtomicOrdering::Release:
     return nullptr; // Nothing to do
-  case Acquire:
-  case AcquireRelease:
-  case SequentiallyConsistent:
+  case AtomicOrdering::Acquire:
+  case AtomicOrdering::AcquireRelease:
+  case AtomicOrdering::SequentiallyConsistent:
     return makeDMB(Builder, ARM_MB::ISH);
   }
   llvm_unreachable("Unknown fence ordering in emitTrailingFence");
@@ -12207,7 +12204,7 @@ Value *ARMTargetLowering::emitLoadLinked(IRBuilder<> &Builder, Value *Addr,
                                          AtomicOrdering Ord) const {
   Module *M = Builder.GetInsertBlock()->getParent()->getParent();
   Type *ValTy = cast<PointerType>(Addr->getType())->getElementType();
-  bool IsAcquire = isAtLeastAcquire(Ord);
+  bool IsAcquire = isAcquireOrStronger(Ord);
 
   // Since i64 isn't legal and intrinsics don't get type-lowered, the ldrexd
   // intrinsic must return {i32, i32} and we have to recombine them into a
@@ -12251,7 +12248,7 @@ Value *ARMTargetLowering::emitStoreConditional(IRBuilder<> &Builder, Value *Val,
                                                Value *Addr,
                                                AtomicOrdering Ord) const {
   Module *M = Builder.GetInsertBlock()->getParent()->getParent();
-  bool IsRelease = isAtLeastRelease(Ord);
+  bool IsRelease = isReleaseOrStronger(Ord);
 
   // Since the intrinsics must have legal type, the i64 intrinsics take two
   // parameters: "i32, i32". We must marshal Val into the appropriate form

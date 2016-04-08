@@ -80,6 +80,7 @@ namespace lltok {
     kw_addrspace,
     kw_section,
     kw_alias,
+    kw_ifunc,
     kw_module,
     kw_asm,
     kw_sideeffect,
@@ -106,6 +107,10 @@ namespace lltok {
     kw_x86_intrcc,
     kw_hhvmcc, kw_hhvm_ccc,
     kw_cxx_fast_tlscc,
+    kw_amdgpu_vs,
+    kw_amdgpu_gs,
+    kw_amdgpu_ps,
+    kw_amdgpu_cs,
 
     // Attributes:
     kw_attributes,
@@ -223,6 +228,7 @@ namespace lltok {
     DwarfAttEncoding,  // DW_ATE_foo
     DwarfVirtuality,   // DW_VIRTUALITY_foo
     DwarfLang,         // DW_LANG_foo
+    EmissionKind,      // lineTablesOnly
     DwarfOp,           // DW_OP_foo
     DIFlag,            // DIFlagFoo
     DwarfMacinfo,      // DW_MACINFO_foo
