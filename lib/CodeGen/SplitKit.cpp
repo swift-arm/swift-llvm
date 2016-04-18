@@ -1005,12 +1005,22 @@ bool SplitEditor::transferValues() {
 }
 
 void SplitEditor::extendPHIKillRanges() {
-    // Extend live ranges to be live-out for successor PHI values.
+  // Extend live ranges to be live-out for successor PHI values.
   for (const VNInfo *PHIVNI : Edit->getParent().valnos) {
     if (PHIVNI->isUnused() || !PHIVNI->isPHIDef())
       continue;
     unsigned RegIdx = RegAssign.lookup(PHIVNI->def);
     LiveRange &LR = LIS.getInterval(Edit->get(RegIdx));
+
+    // Check whether PHI is dead.
+    const LiveRange::Segment *Segment = LR.getSegmentContaining(PHIVNI->def);
+    assert(Segment != nullptr && "Missing segment for VNI");
+    if (Segment->end == PHIVNI->def.getDeadSlot()) {
+      // This is a dead PHI. Remove it.
+      LR.removeSegment(*Segment, true);
+      continue;
+    }
+
     LiveRangeCalc &LRC = getLRCalc(RegIdx);
     MachineBasicBlock *MBB = LIS.getMBBFromIndex(PHIVNI->def);
     for (MachineBasicBlock::pred_iterator PI = MBB->pred_begin(),
@@ -1137,13 +1147,14 @@ void SplitEditor::finish(SmallVectorImpl<unsigned> *LRMap) {
 
   // Transfer the simply mapped values, check if any are skipped.
   bool Skipped = transferValues();
+
+  // Rewrite virtual registers, possibly extending ranges.
+  rewriteAssigned(Skipped);
+
   if (Skipped)
     extendPHIKillRanges();
   else
     ++NumSimple;
-
-  // Rewrite virtual registers, possibly extending ranges.
-  rewriteAssigned(Skipped);
 
   // Delete defs that were rematted everywhere.
   if (Skipped)

@@ -49,12 +49,9 @@ ARMBaseRegisterInfo::ARMBaseRegisterInfo()
     : ARMGenRegisterInfo(ARM::LR, 0, 0, ARM::PC), BasePtr(ARM::R6) {}
 
 static unsigned getFramePointerReg(const ARMSubtarget &STI) {
-  if (STI.isTargetMachO()) {
-    if (STI.isTargetDarwin() || STI.isThumb1Only())
-      return ARM::R7;
-    else
-      return ARM::R11;
-  } else if (STI.isTargetWindows())
+  if (STI.isTargetMachO())
+    return ARM::R7;
+  else if (STI.isTargetWindows())
     return ARM::R11;
   else // ARM EABI
     return STI.isThumb() ? ARM::R7 : ARM::R11;
@@ -87,7 +84,7 @@ ARMBaseRegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
     }
   }
 
-  if (STI.isTargetDarwin() &&
+  if (STI.isTargetDarwin() && STI.getTargetLowering()->supportSwiftError() &&
       F->getAttributes().hasAttrSomewhere(Attribute::SwiftError))
     return CSR_iOS_SwiftError_SaveList;
 
@@ -115,7 +112,7 @@ ARMBaseRegisterInfo::getCallPreservedMask(const MachineFunction &MF,
     // This is academic becase all GHC calls are (supposed to be) tail calls
     return CSR_NoRegs_RegMask;
 
-  if (STI.isTargetDarwin() &&
+  if (STI.isTargetDarwin() && STI.getTargetLowering()->supportSwiftError() &&
       MF.getFunction()->getAttributes().hasAttrSomewhere(Attribute::SwiftError))
     return CSR_iOS_SwiftError_RegMask;
 

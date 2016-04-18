@@ -140,7 +140,7 @@ void RuntimePointerChecking::insert(Loop *Lp, Value *Ptr, bool WritePtr,
   else {
     const SCEVAddRecExpr *AR = dyn_cast<SCEVAddRecExpr>(Sc);
     assert(AR && "Invalid addrec expression");
-    const SCEV *Ex = SE->getBackedgeTakenCount(Lp);
+    const SCEV *Ex = PSE.getBackedgeTakenCount();
 
     ScStart = AR->getStart();
     ScEnd = AR->evaluateAtIteration(Ex, *SE);
@@ -1460,7 +1460,7 @@ bool LoopAccessInfo::canAnalyzeLoop() {
   }
 
   // ScalarEvolution needs to be able to find the exit count.
-  const SCEV *ExitCount = PSE.getSE()->getBackedgeTakenCount(TheLoop);
+  const SCEV *ExitCount = PSE.getBackedgeTakenCount();
   if (ExitCount == PSE.getSE()->getCouldNotCompute()) {
     emitAnalysis(LoopAccessReport()
                  << "could not determine number of loop iterations");
@@ -1904,6 +1904,11 @@ void LoopAccessInfo::print(raw_ostream &OS, unsigned Depth) const {
 
   OS.indent(Depth) << "SCEV assumptions:\n";
   PSE.getUnionPredicate().print(OS, Depth);
+
+  OS << "\n";
+
+  OS.indent(Depth) << "Expressions re-written:\n";
+  PSE.print(OS, Depth);
 }
 
 const LoopAccessInfo &

@@ -510,7 +510,9 @@ bool SystemZInstrInfo::isPredicable(MachineInstr &MI) const {
   unsigned Opcode = MI.getOpcode();
   if (STI.hasLoadStoreOnCond() && getConditionalMove(Opcode))
     return true;
-  if (Opcode == SystemZ::Return)
+  if (Opcode == SystemZ::Return ||
+      Opcode == SystemZ::CallJG ||
+      Opcode == SystemZ::CallBR)
     return true;
   return false;
 }
@@ -568,6 +570,29 @@ bool SystemZInstrInfo::PredicateInstruction(
     MI.setDesc(get(SystemZ::CondReturn));
     MachineInstrBuilder(*MI.getParent()->getParent(), MI)
       .addImm(CCValid).addImm(CCMask)
+      .addReg(SystemZ::CC, RegState::Implicit);
+    return true;
+  }
+  if (Opcode == SystemZ::CallJG) {
+    const GlobalValue *Global = MI.getOperand(0).getGlobal();
+    const uint32_t *RegMask = MI.getOperand(1).getRegMask();
+    MI.RemoveOperand(1);
+    MI.RemoveOperand(0);
+    MI.setDesc(get(SystemZ::CallBRCL));
+    MachineInstrBuilder(*MI.getParent()->getParent(), MI)
+      .addImm(CCValid).addImm(CCMask)
+      .addGlobalAddress(Global)
+      .addRegMask(RegMask)
+      .addReg(SystemZ::CC, RegState::Implicit);
+    return true;
+  }
+  if (Opcode == SystemZ::CallBR) {
+    const uint32_t *RegMask = MI.getOperand(0).getRegMask();
+    MI.RemoveOperand(0);
+    MI.setDesc(get(SystemZ::CallBCR));
+    MachineInstrBuilder(*MI.getParent()->getParent(), MI)
+      .addImm(CCValid).addImm(CCMask)
+      .addRegMask(RegMask)
       .addReg(SystemZ::CC, RegState::Implicit);
     return true;
   }
@@ -1331,6 +1356,27 @@ unsigned SystemZInstrInfo::getCompareAndBranch(unsigned Opcode,
       return SystemZ::CLIBReturn;
     case SystemZ::CLGFI:
       return SystemZ::CLGIBReturn;
+    default:
+      return 0;
+    }
+  case SystemZII::CompareAndSibcall:
+    switch (Opcode) {
+    case SystemZ::CR:
+      return SystemZ::CRBCall;
+    case SystemZ::CGR:
+      return SystemZ::CGRBCall;
+    case SystemZ::CHI:
+      return SystemZ::CIBCall;
+    case SystemZ::CGHI:
+      return SystemZ::CGIBCall;
+    case SystemZ::CLR:
+      return SystemZ::CLRBCall;
+    case SystemZ::CLGR:
+      return SystemZ::CLGRBCall;
+    case SystemZ::CLFI:
+      return SystemZ::CLIBCall;
+    case SystemZ::CLGFI:
+      return SystemZ::CLGIBCall;
     default:
       return 0;
     }

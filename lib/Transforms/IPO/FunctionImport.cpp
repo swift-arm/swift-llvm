@@ -79,13 +79,16 @@ namespace {
 ///   number of source modules parsed/linked.
 /// - One that has PGO data attached.
 /// - [insert you fancy metric here]
-static const FunctionSummary *
+static const GlobalValueSummary *
 selectCallee(const GlobalValueInfoList &CalleeInfoList, unsigned Threshold) {
   auto It = llvm::find_if(
       CalleeInfoList, [&](const std::unique_ptr<GlobalValueInfo> &GlobInfo) {
         assert(GlobInfo->summary() &&
                "We should not have a Global Info without summary");
-        auto *Summary = cast<FunctionSummary>(GlobInfo->summary());
+        auto *GVSummary = GlobInfo->summary();
+        if (auto *AS = dyn_cast<AliasSummary>(GVSummary))
+          GVSummary = &AS->getAliasee();
+        auto *Summary = cast<FunctionSummary>(GVSummary);
 
         if (GlobalValue::isWeakAnyLinkage(Summary->linkage()))
           return false;
@@ -98,14 +101,14 @@ selectCallee(const GlobalValueInfoList &CalleeInfoList, unsigned Threshold) {
   if (It == CalleeInfoList.end())
     return nullptr;
 
-  return cast<FunctionSummary>((*It)->summary());
+  return cast<GlobalValueSummary>((*It)->summary());
 }
 
 /// Return the summary for the function \p GUID that fits the \p Threshold, or
 /// null if there's no match.
-static const FunctionSummary *selectCallee(GlobalValue::GUID GUID,
-                                           unsigned Threshold,
-                                           const ModuleSummaryIndex &Index) {
+static const GlobalValueSummary *selectCallee(GlobalValue::GUID GUID,
+                                              unsigned Threshold,
+                                              const ModuleSummaryIndex &Index) {
   auto CalleeInfoList = Index.findGlobalValueInfoList(GUID);
   if (CalleeInfoList == Index.end()) {
     return nullptr; // This function does not have a summary
@@ -138,17 +141,17 @@ using EdgeInfo = std::pair<const FunctionSummary *, unsigned /* Threshold */>;
 /// imported functions and the symbols they reference in their source module as
 /// exported from their source module.
 static void computeImportForFunction(
-    StringRef ModulePath, const FunctionSummary &Summary,
-    const ModuleSummaryIndex &Index, unsigned Threshold,
-    const std::map<GlobalValue::GUID, FunctionSummary *> &DefinedFunctions,
+    const FunctionSummary &Summary, const ModuleSummaryIndex &Index,
+    unsigned Threshold,
+    const std::map<GlobalValue::GUID, GlobalValueSummary *> &DefinedGVSummaries,
     SmallVectorImpl<EdgeInfo> &Worklist,
     FunctionImporter::ImportMapTy &ImportsForModule,
-    StringMap<FunctionImporter::ExportSetTy> &ExportLists) {
+    StringMap<FunctionImporter::ExportSetTy> *ExportLists = nullptr) {
   for (auto &Edge : Summary.calls()) {
-    auto GUID = Edge.first;
+    auto GUID = Edge.first.getGUID();
     DEBUG(dbgs() << " edge -> " << GUID << " Threshold:" << Threshold << "\n");
 
-    if (DefinedFunctions.count(GUID)) {
+    if (DefinedGVSummaries.count(GUID)) {
       DEBUG(dbgs() << "ignored! Target already in destination module.\n");
       continue;
     }
@@ -158,11 +161,19 @@ static void computeImportForFunction(
       DEBUG(dbgs() << "ignored! No qualifying callee with summary found.\n");
       continue;
     }
-    assert(CalleeSummary->instCount() <= Threshold &&
+    // "Resolve" the summary, traversing alias,
+    const FunctionSummary *ResolvedCalleeSummary;
+    if (isa<AliasSummary>(CalleeSummary))
+      ResolvedCalleeSummary = cast<FunctionSummary>(
+          &cast<AliasSummary>(CalleeSummary)->getAliasee());
+    else
+      ResolvedCalleeSummary = cast<FunctionSummary>(CalleeSummary);
+
+    assert(ResolvedCalleeSummary->instCount() <= Threshold &&
            "selectCallee() didn't honor the threshold");
 
-    auto &ProcessedThreshold =
-        ImportsForModule[CalleeSummary->modulePath()][GUID];
+    auto ExportModulePath = ResolvedCalleeSummary->modulePath();
+    auto &ProcessedThreshold = ImportsForModule[ExportModulePath][GUID];
     /// Since the traversal of the call graph is DFS, we can revisit a function
     /// a second time with a higher threshold. In this case, it is added back to
     /// the worklist with the new threshold.
@@ -175,23 +186,25 @@ static void computeImportForFunction(
     ProcessedThreshold = Threshold;
 
     // Make exports in the source module.
-    auto ExportModulePath = CalleeSummary->modulePath();
-    auto ExportList = ExportLists[ExportModulePath];
-    ExportList.insert(GUID);
-    // Mark all functions and globals referenced by this function as exported to
-    // the outside if they are defined in the same source module.
-    for (auto &Edge : CalleeSummary->calls()) {
-      auto CalleeGUID = Edge.first;
-      if (isGlobalExported(Index, ExportModulePath, CalleeGUID))
-        ExportList.insert(CalleeGUID);
-    }
-    for (auto &GUID : CalleeSummary->refs()) {
-      if (isGlobalExported(Index, ExportModulePath, GUID))
-        ExportList.insert(GUID);
+    if (ExportLists) {
+      auto &ExportList = (*ExportLists)[ExportModulePath];
+      ExportList.insert(GUID);
+      // Mark all functions and globals referenced by this function as exported
+      // to the outside if they are defined in the same source module.
+      for (auto &Edge : ResolvedCalleeSummary->calls()) {
+        auto CalleeGUID = Edge.first.getGUID();
+        if (isGlobalExported(Index, ExportModulePath, CalleeGUID))
+          ExportList.insert(CalleeGUID);
+      }
+      for (auto &Ref : ResolvedCalleeSummary->refs()) {
+        auto GUID = Ref.getGUID();
+        if (isGlobalExported(Index, ExportModulePath, GUID))
+          ExportList.insert(GUID);
+      }
     }
 
     // Insert the newly imported function to the worklist.
-    Worklist.push_back(std::make_pair(CalleeSummary, Threshold));
+    Worklist.push_back(std::make_pair(ResolvedCalleeSummary, Threshold));
   }
 }
 
@@ -199,22 +212,27 @@ static void computeImportForFunction(
 /// as well as the list of "exports", i.e. the list of symbols referenced from
 /// another module (that may require promotion).
 static void ComputeImportForModule(
-    StringRef ModulePath,
-    const std::map<GlobalValue::GUID, FunctionSummary *> &DefinedFunctions,
+    const std::map<GlobalValue::GUID, GlobalValueSummary *> &DefinedGVSummaries,
     const ModuleSummaryIndex &Index,
     FunctionImporter::ImportMapTy &ImportsForModule,
-    StringMap<FunctionImporter::ExportSetTy> &ExportLists) {
+    StringMap<FunctionImporter::ExportSetTy> *ExportLists = nullptr) {
   // Worklist contains the list of function imported in this module, for which
   // we will analyse the callees and may import further down the callgraph.
   SmallVector<EdgeInfo, 128> Worklist;
 
   // Populate the worklist with the import for the functions in the current
   // module
-  for (auto &FuncInfo : DefinedFunctions) {
-    auto *Summary = FuncInfo.second;
-    DEBUG(dbgs() << "Initalize import for " << FuncInfo.first << "\n");
-    computeImportForFunction(ModulePath, *Summary, Index, ImportInstrLimit,
-                             DefinedFunctions, Worklist, ImportsForModule,
+  for (auto &GVInfo : DefinedGVSummaries) {
+    auto *Summary = GVInfo.second;
+    if (auto *AS = dyn_cast<AliasSummary>(Summary))
+      Summary = &AS->getAliasee();
+    auto *FuncSummary = dyn_cast<FunctionSummary>(Summary);
+    if (!FuncSummary)
+      // Skip import for global variables
+      continue;
+    DEBUG(dbgs() << "Initalize import for " << GVInfo.first << "\n");
+    computeImportForFunction(*FuncSummary, Index, ImportInstrLimit,
+                             DefinedGVSummaries, Worklist, ImportsForModule,
                              ExportLists);
   }
 
@@ -227,46 +245,27 @@ static void ComputeImportForModule(
     // Adjust the threshold
     Threshold = Threshold * ImportInstrFactor;
 
-    computeImportForFunction(ModulePath, *Summary, Index, Threshold,
-                             DefinedFunctions, Worklist, ImportsForModule,
-                             ExportLists);
+    computeImportForFunction(*Summary, Index, Threshold, DefinedGVSummaries,
+                             Worklist, ImportsForModule, ExportLists);
   }
 }
 
 } // anonymous namespace
 
-/// Compute all the import and export for every module in the Index.
+/// Compute all the import and export for every module using the Index.
 void llvm::ComputeCrossModuleImport(
     const ModuleSummaryIndex &Index,
+    const StringMap<std::map<GlobalValue::GUID, GlobalValueSummary *>> &
+        ModuleToDefinedGVSummaries,
     StringMap<FunctionImporter::ImportMapTy> &ImportLists,
     StringMap<FunctionImporter::ExportSetTy> &ExportLists) {
-  auto ModuleCount = Index.modulePaths().size();
-
-  // Collect for each module the list of function it defines.
-  // GUID -> Summary
-  StringMap<std::map<GlobalValue::GUID, FunctionSummary *>>
-      Module2FunctionInfoMap(ModuleCount);
-
-  for (auto &GlobalList : Index) {
-    auto GUID = GlobalList.first;
-    for (auto &GlobInfo : GlobalList.second) {
-      auto *Summary = dyn_cast_or_null<FunctionSummary>(GlobInfo->summary());
-      if (!Summary)
-        /// Ignore global variable, focus on functions
-        continue;
-      DEBUG(dbgs() << "Adding definition: Module '" << Summary->modulePath()
-                   << "' defines '" << GUID << "'\n");
-      Module2FunctionInfoMap[Summary->modulePath()][GUID] = Summary;
-    }
-  }
-
   // For each module that has function defined, compute the import/export lists.
-  for (auto &DefinedFunctions : Module2FunctionInfoMap) {
-    auto &ImportsForModule = ImportLists[DefinedFunctions.first()];
-    DEBUG(dbgs() << "Computing import for Module '" << DefinedFunctions.first()
-                 << "'\n");
-    ComputeImportForModule(DefinedFunctions.first(), DefinedFunctions.second,
-                           Index, ImportsForModule, ExportLists);
+  for (auto &DefinedGVSummaries : ModuleToDefinedGVSummaries) {
+    auto &ImportsForModule = ImportLists[DefinedGVSummaries.first()];
+    DEBUG(dbgs() << "Computing import for Module '"
+                 << DefinedGVSummaries.first() << "'\n");
+    ComputeImportForModule(DefinedGVSummaries.second, Index, ImportsForModule,
+                           &ExportLists);
   }
 
 #ifndef NDEBUG
@@ -283,6 +282,31 @@ void llvm::ComputeCrossModuleImport(
       DEBUG(dbgs() << " - " << Src.second.size() << " functions imported from "
                    << SrcModName << "\n");
     }
+  }
+#endif
+}
+
+/// Compute all the imports for the given module in the Index.
+void llvm::ComputeCrossModuleImportForModule(
+    StringRef ModulePath, const ModuleSummaryIndex &Index,
+    FunctionImporter::ImportMapTy &ImportList) {
+
+  // Collect the list of functions this module defines.
+  // GUID -> Summary
+  std::map<GlobalValue::GUID, GlobalValueSummary *> FunctionInfoMap;
+  Index.collectDefinedFunctionsForModule(ModulePath, FunctionInfoMap);
+
+  // Compute the import list for this module.
+  DEBUG(dbgs() << "Computing import for Module '" << ModulePath << "'\n");
+  ComputeImportForModule(FunctionInfoMap, Index, ImportList);
+
+#ifndef NDEBUG
+  DEBUG(dbgs() << "* Module " << ModulePath << " imports from "
+               << ImportList.size() << " modules.\n");
+  for (auto &Src : ImportList) {
+    auto SrcModName = Src.first();
+    DEBUG(dbgs() << " - " << Src.second.size() << " functions imported from "
+                 << SrcModName << "\n");
   }
 #endif
 }
@@ -332,6 +356,19 @@ bool FunctionImporter::importFunctions(
         GlobalsToImport.insert(&GV);
       }
     }
+    for (auto &GV : SrcModule->globals()) {
+      if (!GV.hasName())
+        continue;
+      auto GUID = GV.getGUID();
+      auto Import = ImportGUIDs.count(GUID);
+      DEBUG(dbgs() << (Import ? "Is" : "Not") << " importing " << GUID << " "
+                   << GV.getName() << " from " << SrcModule->getSourceFileName()
+                   << "\n");
+      if (Import) {
+        GV.materialize();
+        GlobalsToImport.insert(&GV);
+      }
+    }
     for (auto &GV : SrcModule->aliases()) {
       if (!GV.hasName())
         continue;
@@ -344,23 +381,17 @@ bool FunctionImporter::importFunctions(
         // Alias can't point to "available_externally". However when we import
         // linkOnceODR the linkage does not change. So we import the alias
         // and aliasee only in this case.
-        const GlobalObject *GO = GV.getBaseObject();
+        GlobalObject *GO = GV.getBaseObject();
         if (!GO->hasLinkOnceODRLinkage())
           continue;
-        GV.materialize();
-        GlobalsToImport.insert(&GV);
+#ifndef NDEBUG
+        if (!GlobalsToImport.count(GO))
+          DEBUG(dbgs() << " alias triggers importing aliasee " << GO->getGUID()
+                       << " " << GO->getName() << " from "
+                       << SrcModule->getSourceFileName() << "\n");
+#endif
+        GO->materialize();
         GlobalsToImport.insert(GO);
-      }
-    }
-    for (auto &GV : SrcModule->globals()) {
-      if (!GV.hasName())
-        continue;
-      auto GUID = GV.getGUID();
-      auto Import = ImportGUIDs.count(GUID);
-      DEBUG(dbgs() << (Import ? "Is" : "Not") << " importing " << GUID << " "
-                   << GV.getName() << " from " << SrcModule->getSourceFileName()
-                   << "\n");
-      if (Import) {
         GV.materialize();
         GlobalsToImport.insert(&GV);
       }
@@ -438,9 +469,7 @@ public:
   static char ID;
 
   /// Specify pass name for debug output
-  const char *getPassName() const override {
-    return "Function Importing";
-  }
+  const char *getPassName() const override { return "Function Importing"; }
 
   explicit FunctionImportPass(const ModuleSummaryIndex *Index = nullptr)
       : ModulePass(ID), Index(Index) {}
@@ -464,13 +493,10 @@ public:
       Index = IndexPtr.get();
     }
 
-    // First step is collecting the import/export lists
-    // The export list is not used yet, but could limit the amount of renaming
-    // performed in renameModuleForThinLTO()
-    StringMap<FunctionImporter::ImportMapTy> ImportLists;
-    StringMap<FunctionImporter::ExportSetTy> ExportLists;
-    ComputeCrossModuleImport(*Index, ImportLists, ExportLists);
-    auto &ImportList = ImportLists[M.getModuleIdentifier()];
+    // First step is collecting the import list.
+    FunctionImporter::ImportMapTy ImportList;
+    ComputeCrossModuleImportForModule(M.getModuleIdentifier(), *Index,
+                                      ImportList);
 
     // Next we need to promote to global scope and rename any local values that
     // are potentially exported to other modules.

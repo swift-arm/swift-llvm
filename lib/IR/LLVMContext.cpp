@@ -25,12 +25,6 @@
 #include <cctype>
 using namespace llvm;
 
-static ManagedStatic<LLVMContext> GlobalContext;
-
-LLVMContext& llvm::getGlobalContext() {
-  return *GlobalContext;
-}
-
 LLVMContext::LLVMContext() : pImpl(new LLVMContextImpl(*this)) {
   // Create the fixed metadata kinds. This is done in the same order as the
   // MD_* enum values so that they correspond.
@@ -315,6 +309,23 @@ void LLVMContext::deleteGC(const Function &Fn) {
 
 bool LLVMContext::shouldDiscardValueNames() const {
   return pImpl->DiscardValueNames;
+}
+
+bool LLVMContext::hasDITypeMap() const { return !!pImpl->DITypeMap; }
+
+void LLVMContext::ensureDITypeMap() {
+  if (pImpl->DITypeMap)
+    return;
+
+  pImpl->DITypeMap = llvm::make_unique<DenseMap<const MDString *, DIType *>>();
+}
+
+void LLVMContext::destroyDITypeMap() { pImpl->DITypeMap.reset(); }
+
+DIType **LLVMContext::getOrInsertDITypeMapping(const MDString &S) {
+  if (!hasDITypeMap())
+    return nullptr;
+  return &(*pImpl->DITypeMap)[&S];
 }
 
 void LLVMContext::setDiscardValueNames(bool Discard) {

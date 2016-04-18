@@ -6029,6 +6029,25 @@ PPCTargetLowering::LowerReturn(SDValue Chain,
     RetOps.push_back(DAG.getRegister(VA.getLocReg(), VA.getLocVT()));
   }
 
+  const PPCRegisterInfo *TRI = Subtarget.getRegisterInfo();
+  const MCPhysReg *I =
+    TRI->getCalleeSavedRegsViaCopy(&DAG.getMachineFunction());
+  if (I) {
+    for (; *I; ++I) {
+
+      if (PPC::G8RCRegClass.contains(*I))
+        RetOps.push_back(DAG.getRegister(*I, MVT::i64));
+      else if (PPC::F8RCRegClass.contains(*I))
+        RetOps.push_back(DAG.getRegister(*I, MVT::getFloatingPointVT(64)));
+      else if (PPC::CRRCRegClass.contains(*I))
+        RetOps.push_back(DAG.getRegister(*I, MVT::i1));
+      else if (PPC::VRRCRegClass.contains(*I))
+        RetOps.push_back(DAG.getRegister(*I, MVT::Other));
+      else
+        llvm_unreachable("Unexpected register class in CSRsViaCopy!");
+    }
+  }
+
   RetOps[0] = Chain;  // Update chain.
 
   // Add the flag if we have it.
@@ -10333,13 +10352,24 @@ SDValue PPCTargetLowering::expandVSXLoadForLE(SDNode *N,
   MVT VecTy = N->getValueType(0).getSimpleVT();
   SDValue LoadOps[] = { Chain, Base };
   SDValue Load = DAG.getMemIntrinsicNode(PPCISD::LXVD2X, dl,
-                                         DAG.getVTList(VecTy, MVT::Other),
-                                         LoadOps, VecTy, MMO);
+                                         DAG.getVTList(MVT::v2f64, MVT::Other),
+                                         LoadOps, MVT::v2f64, MMO);
+
   DCI.AddToWorklist(Load.getNode());
   Chain = Load.getValue(1);
-  SDValue Swap = DAG.getNode(PPCISD::XXSWAPD, dl,
-                             DAG.getVTList(VecTy, MVT::Other), Chain, Load);
+  SDValue Swap = DAG.getNode(
+      PPCISD::XXSWAPD, dl, DAG.getVTList(MVT::v2f64, MVT::Other), Chain, Load);
   DCI.AddToWorklist(Swap.getNode());
+
+  // Add a bitcast if the resulting load type doesn't match v2f64.
+  if (VecTy != MVT::v2f64) {
+    SDValue N = DAG.getNode(ISD::BITCAST, dl, VecTy, Swap);
+    DCI.AddToWorklist(N.getNode());
+    // Package {bitcast value, swap's chain} to match Load's shape.
+    return DAG.getNode(ISD::MERGE_VALUES, dl, DAG.getVTList(VecTy, MVT::Other),
+                       N, Swap.getValue(1));
+  }
+
   return Swap;
 }
 
@@ -10383,8 +10413,15 @@ SDValue PPCTargetLowering::expandVSXStoreForLE(SDNode *N,
 
   SDValue Src = N->getOperand(SrcOpnd);
   MVT VecTy = Src.getValueType().getSimpleVT();
+
+  // All stores are done as v2f64 and possible bit cast.
+  if (VecTy != MVT::v2f64) {
+    Src = DAG.getNode(ISD::BITCAST, dl, MVT::v2f64, Src);
+    DCI.AddToWorklist(Src.getNode());
+  }
+
   SDValue Swap = DAG.getNode(PPCISD::XXSWAPD, dl,
-                             DAG.getVTList(VecTy, MVT::Other), Chain, Src);
+                             DAG.getVTList(MVT::v2f64, MVT::Other), Chain, Src);
   DCI.AddToWorklist(Swap.getNode());
   Chain = Swap.getValue(1);
   SDValue StoreOps[] = { Chain, Swap, Base };
@@ -11921,4 +11958,58 @@ FastISel *
 PPCTargetLowering::createFastISel(FunctionLoweringInfo &FuncInfo,
                                   const TargetLibraryInfo *LibInfo) const {
   return PPC::createFastISel(FuncInfo, LibInfo);
+}
+
+void PPCTargetLowering::initializeSplitCSR(MachineBasicBlock *Entry) const {
+  if (Subtarget.isDarwinABI()) return;
+  if (!Subtarget.isPPC64()) return;
+
+  // Update IsSplitCSR in PPCFunctionInfo
+  PPCFunctionInfo *PFI = Entry->getParent()->getInfo<PPCFunctionInfo>();
+  PFI->setIsSplitCSR(true);
+}
+
+void PPCTargetLowering::insertCopiesSplitCSR(
+  MachineBasicBlock *Entry,
+  const SmallVectorImpl<MachineBasicBlock *> &Exits) const {
+  const PPCRegisterInfo *TRI = Subtarget.getRegisterInfo();
+  const MCPhysReg *IStart = TRI->getCalleeSavedRegsViaCopy(Entry->getParent());
+  if (!IStart)
+    return;
+
+  const TargetInstrInfo *TII = Subtarget.getInstrInfo();
+  MachineRegisterInfo *MRI = &Entry->getParent()->getRegInfo();
+  MachineBasicBlock::iterator MBBI = Entry->begin();
+  for (const MCPhysReg *I = IStart; *I; ++I) {
+    const TargetRegisterClass *RC = nullptr;
+    if (PPC::G8RCRegClass.contains(*I))
+      RC = &PPC::G8RCRegClass;
+    else if (PPC::F8RCRegClass.contains(*I))
+      RC = &PPC::F8RCRegClass;
+    else if (PPC::CRRCRegClass.contains(*I))
+      RC = &PPC::CRRCRegClass;
+    else if (PPC::VRRCRegClass.contains(*I))
+      RC = &PPC::VRRCRegClass;
+    else
+      llvm_unreachable("Unexpected register class in CSRsViaCopy!");
+
+    unsigned NewVR = MRI->createVirtualRegister(RC);
+    // Create copy from CSR to a virtual register.
+    // FIXME: this currently does not emit CFI pseudo-instructions, it works
+    // fine for CXX_FAST_TLS since the C++-style TLS access functions should be
+    // nounwind. If we want to generalize this later, we may need to emit
+    // CFI pseudo-instructions.
+    assert(Entry->getParent()->getFunction()->hasFnAttribute(
+             Attribute::NoUnwind) &&
+           "Function should be nounwind in insertCopiesSplitCSR!");
+    Entry->addLiveIn(*I);
+    BuildMI(*Entry, MBBI, DebugLoc(), TII->get(TargetOpcode::COPY), NewVR)
+      .addReg(*I);
+
+    // Insert the copy-back instructions right before the terminator
+    for (auto *Exit : Exits)
+      BuildMI(*Exit, Exit->getFirstTerminator(), DebugLoc(),
+              TII->get(TargetOpcode::COPY), *I)
+        .addReg(NewVR);
+  }
 }

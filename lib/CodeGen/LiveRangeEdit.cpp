@@ -148,10 +148,12 @@ SlotIndex LiveRangeEdit::rematerializeAt(MachineBasicBlock &MBB,
                                          bool Late) {
   assert(RM.OrigMI && "Invalid remat");
   TII.reMaterialize(MBB, MI, DestReg, 0, RM.OrigMI, tri);
+  // DestReg of the cloned instruction cannot be Dead. Set isDead of DestReg
+  // to false anyway in case the isDead flag of RM.OrigMI's dest register
+  // is true.
+  (*--MI).getOperand(0).setIsDead(false);
   Rematted.insert(RM.ParentVNI);
-  return LIS.getSlotIndexes()
-      ->insertMachineInstrInMaps(*--MI, Late)
-      .getRegSlot();
+  return LIS.getSlotIndexes()->insertMachineInstrInMaps(*MI, Late).getRegSlot();
 }
 
 void LiveRangeEdit::eraseVirtReg(unsigned Reg) {
@@ -325,12 +327,14 @@ void LiveRangeEdit::eliminateDeadDef(MachineInstr *MI, ToShrinkSet &ToShrink) {
     // The inst is saved in LiveRangeEdit::DeadRemats and will be deleted
     // after all the allocations of the func are done.
     if (isOrigDef) {
-      unsigned NewDest = createFrom(Dest);
+      LiveInterval &NewLI = createEmptyIntervalFrom(Dest);
+      VNInfo *VNI = NewLI.getNextValue(Idx, LIS.getVNInfoAllocator());
+      NewLI.addSegment(LiveInterval::Segment(Idx, Idx.getDeadSlot(), VNI));
       pop_back();
       markDeadRemat(MI);
       const TargetRegisterInfo &TRI = *MRI.getTargetRegisterInfo();
-      MI->substituteRegister(Dest, NewDest, 0, TRI);
-      MI->getOperand(0).setIsDead(false);
+      MI->substituteRegister(Dest, NewLI.reg, 0, TRI);
+      MI->getOperand(0).setIsDead(true);
     } else {
       if (TheDelegate)
         TheDelegate->LRE_WillEraseInstruction(MI);
@@ -352,8 +356,7 @@ void LiveRangeEdit::eliminateDeadDef(MachineInstr *MI, ToShrinkSet &ToShrink) {
 }
 
 void LiveRangeEdit::eliminateDeadDefs(SmallVectorImpl<MachineInstr *> &Dead,
-                                      ArrayRef<unsigned> RegsBeingSpilled,
-                                      bool NoSplit) {
+                                      ArrayRef<unsigned> RegsBeingSpilled) {
   ToShrinkSet ToShrink;
 
   for (;;) {
@@ -373,9 +376,6 @@ void LiveRangeEdit::eliminateDeadDefs(SmallVectorImpl<MachineInstr *> &Dead,
     if (TheDelegate)
       TheDelegate->LRE_WillShrinkVirtReg(VReg);
     if (!LIS.shrinkToUses(LI, &Dead))
-      continue;
-
-    if (NoSplit)
       continue;
 
     // Don't create new intervals for a register being spilled.

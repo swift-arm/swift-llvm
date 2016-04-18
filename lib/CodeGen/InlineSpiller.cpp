@@ -31,6 +31,7 @@
 #include "llvm/CodeGen/MachineLoopInfo.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/VirtRegMap.h"
+#include "llvm/IR/DebugInfo.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
@@ -54,7 +55,8 @@ static cl::opt<bool> DisableHoisting("disable-spill-hoist", cl::Hidden,
                                      cl::desc("Disable inline spill hoisting"));
 
 namespace {
-class HoistSpillHelper {
+class HoistSpillHelper : private LiveRangeEdit::Delegate {
+  MachineFunction &MF;
   LiveIntervals &LIS;
   LiveStacks &LSS;
   AliasAnalysis *AA;
@@ -104,7 +106,7 @@ class HoistSpillHelper {
 public:
   HoistSpillHelper(MachineFunctionPass &pass, MachineFunction &mf,
                    VirtRegMap &vrm)
-      : LIS(pass.getAnalysis<LiveIntervals>()),
+      : MF(mf), LIS(pass.getAnalysis<LiveIntervals>()),
         LSS(pass.getAnalysis<LiveStacks>()),
         AA(&pass.getAnalysis<AAResultsWrapperPass>().getAAResults()),
         MDT(pass.getAnalysis<MachineDominatorTree>()),
@@ -117,7 +119,8 @@ public:
   void addToMergeableSpills(MachineInstr *Spill, int StackSlot,
                             unsigned Original);
   bool rmFromMergeableSpills(MachineInstr *Spill, int StackSlot);
-  void hoistAllSpills(LiveRangeEdit &Edit);
+  void hoistAllSpills();
+  void LRE_DidCloneVirtReg(unsigned, unsigned) override;
 };
 
 class InlineSpiller : public Spiller {
@@ -1039,13 +1042,7 @@ void InlineSpiller::spill(LiveRangeEdit &edit) {
 
 /// Optimizations after all the reg selections and spills are done.
 ///
-void InlineSpiller::postOptimization() {
-  SmallVector<unsigned, 4> NewVRegs;
-  LiveRangeEdit LRE(nullptr, NewVRegs, MF, LIS, &VRM, nullptr);
-  HSpiller.hoistAllSpills(LRE);
-  assert(NewVRegs.size() == 0 &&
-         "No new vregs should be generated in hoistAllSpills");
-}
+void InlineSpiller::postOptimization() { HSpiller.hoistAllSpills(); }
 
 /// When a spill is inserted, add the spill to MergeableSpills map.
 ///
@@ -1274,20 +1271,26 @@ void HoistSpillHelper::runHoistSpills(
       MachineDomTreeNode *Child = Children[i];
       if (SpillsInSubTreeMap.find(Child) == SpillsInSubTreeMap.end())
         continue;
-      // SpillsInSubTreeMap[*RIt].second += SpillsInSubTreeMap[Child].second
+      // The stmt "SpillsInSubTree = SpillsInSubTreeMap[*RIt].first" below
       // should be placed before getting the begin and end iterators of
       // SpillsInSubTreeMap[Child].first, or else the iterators may be
       // invalidated when SpillsInSubTreeMap[*RIt] is seen the first time
       // and the map grows and then the original buckets in the map are moved.
-      SpillsInSubTreeMap[*RIt].second += SpillsInSubTreeMap[Child].second;
+      SmallPtrSet<MachineDomTreeNode *, 16> &SpillsInSubTree =
+          SpillsInSubTreeMap[*RIt].first;
+      BlockFrequency &SubTreeCost = SpillsInSubTreeMap[*RIt].second;
+      SubTreeCost += SpillsInSubTreeMap[Child].second;
       auto BI = SpillsInSubTreeMap[Child].first.begin();
       auto EI = SpillsInSubTreeMap[Child].first.end();
-      SpillsInSubTreeMap[*RIt].first.insert(BI, EI);
+      SpillsInSubTree.insert(BI, EI);
       SpillsInSubTreeMap.erase(Child);
     }
 
+    SmallPtrSet<MachineDomTreeNode *, 16> &SpillsInSubTree =
+          SpillsInSubTreeMap[*RIt].first;
+    BlockFrequency &SubTreeCost = SpillsInSubTreeMap[*RIt].second;
     // No spills in subtree, simply continue.
-    if (SpillsInSubTreeMap[*RIt].first.empty())
+    if (SpillsInSubTree.empty())
       continue;
 
     // Check whether Block is a possible candidate to insert spill.
@@ -1297,13 +1300,12 @@ void HoistSpillHelper::runHoistSpills(
 
     // If there are multiple spills that could be merged, bias a little
     // to hoist the spill.
-    BranchProbability MarginProb = (SpillsInSubTreeMap[*RIt].first.size() > 1)
+    BranchProbability MarginProb = (SpillsInSubTree.size() > 1)
                                        ? BranchProbability(9, 10)
                                        : BranchProbability(1, 1);
-    if (SpillsInSubTreeMap[*RIt].second >
-        MBFI.getBlockFreq(Block) * MarginProb) {
+    if (SubTreeCost > MBFI.getBlockFreq(Block) * MarginProb) {
       // Hoist: Move spills to current Block.
-      for (const auto SpillBB : SpillsInSubTreeMap[*RIt].first) {
+      for (const auto SpillBB : SpillsInSubTree) {
         // When SpillBB is a BB contains original spill, insert the spill
         // to SpillsToRm.
         if (SpillsToKeep.find(SpillBB) != SpillsToKeep.end() &&
@@ -1319,14 +1321,14 @@ void HoistSpillHelper::runHoistSpills(
       SpillsToKeep[*RIt] = LiveReg;
       DEBUG({
         dbgs() << "spills in BB: ";
-        for (const auto Rspill : SpillsInSubTreeMap[*RIt].first)
+        for (const auto Rspill : SpillsInSubTree)
           dbgs() << Rspill->getBlock()->getNumber() << " ";
         dbgs() << "were promoted to BB" << (*RIt)->getBlock()->getNumber()
                << "\n";
       });
-      SpillsInSubTreeMap[*RIt].first.clear();
-      SpillsInSubTreeMap[*RIt].first.insert(*RIt);
-      SpillsInSubTreeMap[*RIt].second = MBFI.getBlockFreq(Block);
+      SpillsInSubTree.clear();
+      SpillsInSubTree.insert(*RIt);
+      SubTreeCost = MBFI.getBlockFreq(Block);
     }
   }
   // For spills in SpillsToKeep with LiveReg set (i.e., not original spill),
@@ -1354,7 +1356,10 @@ void HoistSpillHelper::runHoistSpills(
 /// its subtree to that node. In this way, we can get benefit locally even if
 /// hoisting all the equal spills to one cold place is impossible.
 ///
-void HoistSpillHelper::hoistAllSpills(LiveRangeEdit &Edit) {
+void HoistSpillHelper::hoistAllSpills() {
+  SmallVector<unsigned, 4> NewVRegs;
+  LiveRangeEdit Edit(nullptr, NewVRegs, MF, LIS, &VRM, this);
+
   // Save the mapping between stackslot and its original reg.
   DenseMap<int, unsigned> SlotToOrigReg;
   for (unsigned i = 0, e = MRI.getNumVirtRegs(); i != e; ++i) {
@@ -1430,6 +1435,17 @@ void HoistSpillHelper::hoistAllSpills(LiveRangeEdit &Edit) {
           RMEnt->RemoveOperand(i - 1);
       }
     }
-    Edit.eliminateDeadDefs(SpillsToRm, None, true);
+    Edit.eliminateDeadDefs(SpillsToRm, None);
   }
+}
+
+/// For VirtReg clone, the \p New register should have the same physreg or
+/// stackslot as the \p old register.
+void HoistSpillHelper::LRE_DidCloneVirtReg(unsigned New, unsigned Old) {
+  if (VRM.hasPhys(Old))
+    VRM.assignVirt2Phys(New, VRM.getPhys(Old));
+  else if (VRM.getStackSlot(Old) != VirtRegMap::NO_STACK_SLOT)
+    VRM.assignVirt2StackSlot(New, VRM.getStackSlot(Old));
+  else
+    llvm_unreachable("VReg should be assigned either physreg or stackslot");
 }

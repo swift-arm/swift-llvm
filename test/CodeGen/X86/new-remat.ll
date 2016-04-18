@@ -1,4 +1,4 @@
-; RUN: llc < %s | FileCheck %s
+; RUN: llc -verify-regalloc < %s | FileCheck %s
 ; Check all spills are rematerialized.
 ; CHECK-NOT: Spill
 
