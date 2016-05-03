@@ -31,7 +31,6 @@
 #include "llvm/IR/Verifier.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/IR/LegacyPassManager.h"
-#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/TargetRegistry.h"
 #include "llvm/Support/raw_os_ostream.h"
 #include "llvm/Transforms/IPO.h"
@@ -149,11 +148,6 @@ GCNTargetMachine::GCNTargetMachine(const Target &T, const Triple &TT,
 
 namespace {
 
-cl::opt<bool> InsertNops(
-  "amdgpu-insert-nops",
-  cl::desc("Insert two nop instructions for each high level source statement"),
-  cl::init(false));
-
 class AMDGPUPassConfig : public TargetPassConfig {
 public:
   AMDGPUPassConfig(TargetMachine *TM, PassManagerBase &PM)
@@ -211,7 +205,6 @@ public:
   void addFastRegAlloc(FunctionPass *RegAllocPass) override;
   void addOptimizedRegAlloc(FunctionPass *RegAllocPass) override;
   void addPreRegAlloc() override;
-  void addPostRegAlloc() override;
   void addPreSched2() override;
   void addPreEmitPass() override;
 };
@@ -387,19 +380,25 @@ void GCNPassConfig::addOptimizedRegAlloc(FunctionPass *RegAllocPass) {
   TargetPassConfig::addOptimizedRegAlloc(RegAllocPass);
 }
 
-void GCNPassConfig::addPostRegAlloc() {
-  addPass(createSIShrinkInstructionsPass(), false);
-}
-
 void GCNPassConfig::addPreSched2() {
 }
 
 void GCNPassConfig::addPreEmitPass() {
+
+  // The hazard recognizer that runs as part of the post-ra scheduler does not
+  // gaurantee to be able handle all hazards correctly.  This is because
+  // if there are multiple scheduling regions in a basic block, the regions
+  // are scheduled bottom up, so when we begin to schedule a region we don't
+  // know what instructions were emitted directly before it.
+  //
+  // Here we add a stand-alone hazard recognizer pass which can handle all cases.
+  // hazard recognizer pass.
+  addPass(&PostRAHazardRecognizerID);
+
   addPass(createSIInsertWaitsPass(), false);
+  addPass(createSIShrinkInstructionsPass());
   addPass(createSILowerControlFlowPass(), false);
-  if (InsertNops) {
-    addPass(createSIInsertNopsPass(), false);
-  }
+  addPass(createSIInsertNopsPass(), false);
 }
 
 TargetPassConfig *GCNTargetMachine::createPassConfig(PassManagerBase &PM) {

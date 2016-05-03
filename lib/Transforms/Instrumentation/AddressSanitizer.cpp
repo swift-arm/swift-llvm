@@ -13,14 +13,11 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "llvm/Transforms/Instrumentation.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/DepthFirstIterator.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallSet.h"
-#include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/ADT/StringExtras.h"
@@ -48,6 +45,7 @@
 #include "llvm/Support/Endian.h"
 #include "llvm/Support/SwapByteOrder.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Transforms/Instrumentation.h"
 #include "llvm/Transforms/Scalar.h"
 #include "llvm/Transforms/Utils/ASanStackFrameLayout.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
@@ -73,6 +71,7 @@ static const uint64_t kIOSSimShadowOffset64 = kDefaultShadowOffset64;
 static const uint64_t kSmallX86_64ShadowOffset = 0x7FFF8000;  // < 2G.
 static const uint64_t kLinuxKasan_ShadowOffset64 = 0xdffffc0000000000;
 static const uint64_t kPPC64_ShadowOffset64 = 1ULL << 41;
+static const uint64_t kSystemZ_ShadowOffset64 = 1ULL << 52;
 static const uint64_t kMIPS32_ShadowOffset32 = 0x0aaa0000;
 static const uint64_t kMIPS64_ShadowOffset64 = 1ULL << 37;
 static const uint64_t kAArch64_ShadowOffset64 = 1ULL << 36;
@@ -164,8 +163,11 @@ static cl::opt<int> ClMaxInsnsToInstrumentPerBB(
 static cl::opt<bool> ClStack("asan-stack", cl::desc("Handle stack memory"),
                              cl::Hidden, cl::init(true));
 static cl::opt<bool> ClUseAfterReturn("asan-use-after-return",
-                                      cl::desc("Check return-after-free"),
+                                      cl::desc("Check stack-use-after-return"),
                                       cl::Hidden, cl::init(true));
+static cl::opt<bool> ClUseAfterScope("asan-use-after-scope",
+                                     cl::desc("Check stack-use-after-scope"),
+                                     cl::Hidden, cl::init(false));
 // This flag may need to be replaced with -f[no]asan-globals.
 static cl::opt<bool> ClGlobals("asan-globals",
                                cl::desc("Handle global objects"), cl::Hidden,
@@ -220,11 +222,6 @@ static cl::opt<bool> ClOptGlobals("asan-opt-globals",
 static cl::opt<bool> ClOptStack(
     "asan-opt-stack", cl::desc("Don't instrument scalar stack variables"),
     cl::Hidden, cl::init(false));
-
-static cl::opt<bool> ClCheckLifetime(
-    "asan-check-lifetime",
-    cl::desc("Use llvm.lifetime intrinsics to insert extra checks"), cl::Hidden,
-    cl::init(false));
 
 static cl::opt<bool> ClDynamicAllocaStack(
     "asan-stack-dynamic-alloca",
@@ -355,6 +352,7 @@ static ShadowMapping getShadowMapping(Triple &TargetTriple, int LongSize,
   bool IsLinux = TargetTriple.isOSLinux();
   bool IsPPC64 = TargetTriple.getArch() == llvm::Triple::ppc64 ||
                  TargetTriple.getArch() == llvm::Triple::ppc64le;
+  bool IsSystemZ = TargetTriple.getArch() == llvm::Triple::systemz;
   bool IsX86 = TargetTriple.getArch() == llvm::Triple::x86;
   bool IsX86_64 = TargetTriple.getArch() == llvm::Triple::x86_64;
   bool IsMIPS32 = TargetTriple.getArch() == llvm::Triple::mips ||
@@ -385,6 +383,8 @@ static ShadowMapping getShadowMapping(Triple &TargetTriple, int LongSize,
   } else {  // LongSize == 64
     if (IsPPC64)
       Mapping.Offset = kPPC64_ShadowOffset64;
+    else if (IsSystemZ)
+      Mapping.Offset = kSystemZ_ShadowOffset64;
     else if (IsFreeBSD)
       Mapping.Offset = kFreeBSD_ShadowOffset64;
     else if (IsLinux && IsX86_64) {
@@ -410,8 +410,10 @@ static ShadowMapping getShadowMapping(Triple &TargetTriple, int LongSize,
 
   // OR-ing shadow offset if more efficient (at least on x86) if the offset
   // is a power of two, but on ppc64 we have to use add since the shadow
-  // offset is not necessary 1/8-th of the address space.
-  Mapping.OrShadowOffset = !IsAArch64 && !IsPPC64
+  // offset is not necessary 1/8-th of the address space.  On SystemZ,
+  // we could OR the constant in a single instruction, but it's more
+  // efficient to load it once and use indexed addressing.
+  Mapping.OrShadowOffset = !IsAArch64 && !IsPPC64 && !IsSystemZ
                            && !(Mapping.Offset & (Mapping.Offset - 1));
 
   return Mapping;
@@ -716,7 +718,7 @@ struct FunctionStackPoisoner : public InstVisitor<FunctionStackPoisoner> {
     Intrinsic::ID ID = II.getIntrinsicID();
     if (ID == Intrinsic::stackrestore) StackRestoreVec.push_back(&II);
     if (ID == Intrinsic::localescape) LocalEscapeCall = &II;
-    if (!ClCheckLifetime) return;
+    if (!ClUseAfterScope) return;
     if (ID != Intrinsic::lifetime_start && ID != Intrinsic::lifetime_end)
       return;
     // Found lifetime intrinsic, add ASan instrumentation if necessary.
@@ -1306,7 +1308,7 @@ bool AddressSanitizerModule::ShouldUseMachOGlobalsSection() const {
   if (TargetTriple.isMacOSX() && !TargetTriple.isMacOSXVersionLT(10, 11))
     return true;
   if (TargetTriple.isiOS() /* or tvOS */ && !TargetTriple.isOSVersionLT(9))
-    return true;  
+    return true;
   if (TargetTriple.isWatchOS() && !TargetTriple.isOSVersionLT(2))
     return true;
 
@@ -1339,7 +1341,7 @@ void AddressSanitizerModule::initializeCallbacks(Module &M) {
       M.getOrInsertFunction(kAsanRegisterImageGlobalsName,
       IRB.getVoidTy(), IntptrTy, nullptr));
   AsanRegisterImageGlobals->setLinkage(Function::ExternalLinkage);
-  
+
   AsanUnregisterImageGlobals = checkSanitizerInterfaceFunction(
       M.getOrInsertFunction(kAsanUnregisterImageGlobalsName,
       IRB.getVoidTy(), IntptrTy, nullptr));

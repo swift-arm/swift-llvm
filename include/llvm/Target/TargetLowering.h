@@ -41,6 +41,7 @@
 #include <vector>
 
 namespace llvm {
+  class BranchProbability;
   class CallInst;
   class CCState;
   class CCValAssign;
@@ -261,6 +262,10 @@ public:
     return PredictableSelectIsExpensive;
   }
 
+  /// If a branch or a select condition is skewed in one direction by more than
+  /// this factor, it is very likely to be predicted correctly.
+  virtual BranchProbability getPredictableBranchThreshold() const;
+
   /// isLoadBitCastBeneficial() - Return true if the following transform
   /// is beneficial.
   /// fold (conv (load x)) -> (load (conv*)x)
@@ -268,9 +273,31 @@ public:
   /// efficiently, casting the load to a smaller vector of larger types and
   /// loading is more efficient, however, this can be undone by optimizations in
   /// dag combiner.
-  virtual bool isLoadBitCastBeneficial(EVT /* Load */,
-                                       EVT /* Bitcast */) const {
+  virtual bool isLoadBitCastBeneficial(EVT LoadVT,
+                                       EVT BitcastVT) const {
+    // Don't do if we could do an indexed load on the original type, but not on
+    // the new one.
+    if (!LoadVT.isSimple() || !BitcastVT.isSimple())
+      return true;
+
+    MVT LoadMVT = LoadVT.getSimpleVT();
+
+    // Don't bother doing this if it's just going to be promoted again later, as
+    // doing so might interfere with other combines.
+    if (getOperationAction(ISD::LOAD, LoadMVT) == Promote &&
+        getTypeToPromoteTo(ISD::LOAD, LoadMVT) == BitcastVT.getSimpleVT())
+      return false;
+
     return true;
+  }
+
+  /// isStoreBitCastBeneficial() - Mirror of isLoadBitCastBeneficial(). Return
+  /// true if the following transform is beneficial.
+  ///
+  /// (store (y (conv x)), y*)) -> (store x, (x*))
+  virtual bool isStoreBitCastBeneficial(EVT StoreVT, EVT BitcastVT) const {
+    // Default to the same logic as loads.
+    return isLoadBitCastBeneficial(StoreVT, BitcastVT);
   }
 
   /// Return true if it is expected to be cheaper to do a store of a non-zero
@@ -1013,6 +1040,8 @@ public:
 
   /// If the target has a standard location for the stack protector guard,
   /// returns the address of that location. Otherwise, returns nullptr.
+  /// DEPRECATED: please override useLoadStackGuardNode and customize
+  ///             LOAD_STACK_GUARD, or customize @llvm.stackguard().
   virtual Value *getIRStackGuard(IRBuilder<> &IRB) const;
 
   /// Inserts necessary declarations for SSP purpose. Should be used only when
@@ -1022,7 +1051,7 @@ public:
   /// Return the variable that's previously inserted by insertSSPDeclarations,
   /// if any, otherwise return nullptr. Should be used only when
   /// getIRStackGuard returns nullptr.
-  virtual Value *getSDStackGuard(const Module &M) const;
+  virtual Value *getSDagStackGuard(const Module &M) const;
 
   /// If the target has a standard location for the unsafe stack pointer,
   /// returns the address of that location. Otherwise, returns nullptr.
@@ -2922,6 +2951,15 @@ public:
   /// \param ST Store with a vector value type
   /// \returns MERGE_VALUs of the individual store chains.
   SDValue scalarizeVectorStore(StoreSDNode *ST, SelectionDAG &DAG) const;
+
+  /// Expands an unaligned load to 2 half-size loads for an integer, and
+  /// possibly more for vectors.
+  std::pair<SDValue, SDValue> expandUnalignedLoad(LoadSDNode *LD,
+                                                  SelectionDAG &DAG) const;
+
+  /// Expands an unaligned store to 2 half-size stores for integer values, and
+  /// possibly more for vectors.
+  SDValue expandUnalignedStore(StoreSDNode *ST, SelectionDAG &DAG) const;
 
   //===--------------------------------------------------------------------===//
   // Instruction Emitting Hooks

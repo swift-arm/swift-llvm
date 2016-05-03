@@ -2131,14 +2131,15 @@ static Value *SimplifyICmpInst(unsigned Predicate, Value *LHS, Value *RHS,
       if (match(RHS, m_Zero()))
         return LHS;
       break;
-    case ICmpInst::ICMP_UGE:
+    case ICmpInst::ICMP_UGE: {
       // X >=u 1 -> X
       if (match(RHS, m_One()))
         return LHS;
-      if (isImpliedCondition(RHS, LHS, Q.DL))
+      if (isImpliedCondition(RHS, LHS, Q.DL).getValueOr(false))
         return getTrue(ITy);
       break;
-    case ICmpInst::ICMP_SGE:
+    }
+    case ICmpInst::ICMP_SGE: {
       /// For signed comparison, the values for an i1 are 0 and -1
       /// respectively. This maps into a truth table of:
       /// LHS | RHS | LHS >=s RHS   | LHS implies RHS
@@ -2146,9 +2147,10 @@ static Value *SimplifyICmpInst(unsigned Predicate, Value *LHS, Value *RHS,
       ///  0  |  1  |  1 (0 >= -1)  |  1
       ///  1  |  0  |  0 (-1 >= 0)  |  0
       ///  1  |  1  |  1 (-1 >= -1) |  1
-      if (isImpliedCondition(LHS, RHS, Q.DL))
+      if (isImpliedCondition(LHS, RHS, Q.DL).getValueOr(false))
         return getTrue(ITy);
       break;
+    }
     case ICmpInst::ICMP_SLT:
       // X <s 0 -> X
       if (match(RHS, m_Zero()))
@@ -2159,10 +2161,11 @@ static Value *SimplifyICmpInst(unsigned Predicate, Value *LHS, Value *RHS,
       if (match(RHS, m_One()))
         return LHS;
       break;
-    case ICmpInst::ICMP_ULE:
-      if (isImpliedCondition(LHS, RHS, Q.DL))
+    case ICmpInst::ICMP_ULE: {
+      if (isImpliedCondition(LHS, RHS, Q.DL).getValueOr(false))
         return getTrue(ITy);
       break;
+    }
     }
   }
 
@@ -2610,21 +2613,48 @@ static Value *SimplifyICmpInst(unsigned Predicate, Value *LHS, Value *RHS,
     }
   }
 
-  // icmp pred (or X, Y), X
-  if (LBO && match(LBO, m_CombineOr(m_Or(m_Value(), m_Specific(RHS)),
-                                    m_Or(m_Specific(RHS), m_Value())))) {
-    if (Pred == ICmpInst::ICMP_ULT)
-      return getFalse(ITy);
-    if (Pred == ICmpInst::ICMP_UGE)
-      return getTrue(ITy);
-  }
-  // icmp pred X, (or X, Y)
-  if (RBO && match(RBO, m_CombineOr(m_Or(m_Value(), m_Specific(LHS)),
-                                    m_Or(m_Specific(LHS), m_Value())))) {
-    if (Pred == ICmpInst::ICMP_ULE)
-      return getTrue(ITy);
-    if (Pred == ICmpInst::ICMP_UGT)
-      return getFalse(ITy);
+  {
+    Value *Y = nullptr;
+    // icmp pred (or X, Y), X
+    if (LBO && match(LBO, m_c_Or(m_Value(Y), m_Specific(RHS)))) {
+      if (Pred == ICmpInst::ICMP_ULT)
+        return getFalse(ITy);
+      if (Pred == ICmpInst::ICMP_UGE)
+        return getTrue(ITy);
+
+      if (Pred == ICmpInst::ICMP_SLT || Pred == ICmpInst::ICMP_SGE) {
+        bool RHSKnownNonNegative, RHSKnownNegative;
+        bool YKnownNonNegative, YKnownNegative;
+        ComputeSignBit(RHS, RHSKnownNonNegative, RHSKnownNegative, Q.DL, 0,
+                       Q.AC, Q.CxtI, Q.DT);
+        ComputeSignBit(Y, YKnownNonNegative, YKnownNegative, Q.DL, 0, Q.AC,
+                       Q.CxtI, Q.DT);
+        if (RHSKnownNonNegative && YKnownNegative)
+          return Pred == ICmpInst::ICMP_SLT ? getTrue(ITy) : getFalse(ITy);
+        if (RHSKnownNegative || YKnownNonNegative)
+          return Pred == ICmpInst::ICMP_SLT ? getFalse(ITy) : getTrue(ITy);
+      }
+    }
+    // icmp pred X, (or X, Y)
+    if (RBO && match(RBO, m_c_Or(m_Value(Y), m_Specific(LHS)))) {
+      if (Pred == ICmpInst::ICMP_ULE)
+        return getTrue(ITy);
+      if (Pred == ICmpInst::ICMP_UGT)
+        return getFalse(ITy);
+
+      if (Pred == ICmpInst::ICMP_SGT || Pred == ICmpInst::ICMP_SLE) {
+        bool LHSKnownNonNegative, LHSKnownNegative;
+        bool YKnownNonNegative, YKnownNegative;
+        ComputeSignBit(LHS, LHSKnownNonNegative, LHSKnownNegative, Q.DL, 0,
+                       Q.AC, Q.CxtI, Q.DT);
+        ComputeSignBit(Y, YKnownNonNegative, YKnownNegative, Q.DL, 0, Q.AC,
+                       Q.CxtI, Q.DT);
+        if (LHSKnownNonNegative && YKnownNegative)
+          return Pred == ICmpInst::ICMP_SGT ? getTrue(ITy) : getFalse(ITy);
+        if (LHSKnownNegative || YKnownNonNegative)
+          return Pred == ICmpInst::ICMP_SGT ? getFalse(ITy) : getTrue(ITy);
+      }
+    }
   }
 
   // icmp pred (and X, Y), X
@@ -3795,6 +3825,62 @@ static bool IsIdempotent(Intrinsic::ID ID) {
   }
 }
 
+static Value *SimplifyRelativeLoad(Constant *Ptr, Constant *Offset,
+                                   const DataLayout &DL) {
+  GlobalValue *PtrSym;
+  APInt PtrOffset;
+  if (!IsConstantOffsetFromGlobal(Ptr, PtrSym, PtrOffset, DL))
+    return nullptr;
+
+  Type *Int8PtrTy = Type::getInt8PtrTy(Ptr->getContext());
+  Type *Int32Ty = Type::getInt32Ty(Ptr->getContext());
+  Type *Int32PtrTy = Int32Ty->getPointerTo();
+  Type *Int64Ty = Type::getInt64Ty(Ptr->getContext());
+
+  auto *OffsetConstInt = dyn_cast<ConstantInt>(Offset);
+  if (!OffsetConstInt || OffsetConstInt->getType()->getBitWidth() > 64)
+    return nullptr;
+
+  uint64_t OffsetInt = OffsetConstInt->getSExtValue();
+  if (OffsetInt % 4 != 0)
+    return nullptr;
+
+  Constant *C = ConstantExpr::getGetElementPtr(
+      Int32Ty, ConstantExpr::getBitCast(Ptr, Int32PtrTy),
+      ConstantInt::get(Int64Ty, OffsetInt / 4));
+  Constant *Loaded = ConstantFoldLoadFromConstPtr(C, Int32Ty, DL);
+  if (!Loaded)
+    return nullptr;
+
+  auto *LoadedCE = dyn_cast<ConstantExpr>(Loaded);
+  if (!LoadedCE)
+    return nullptr;
+
+  if (LoadedCE->getOpcode() == Instruction::Trunc) {
+    LoadedCE = dyn_cast<ConstantExpr>(LoadedCE->getOperand(0));
+    if (!LoadedCE)
+      return nullptr;
+  }
+
+  if (LoadedCE->getOpcode() != Instruction::Sub)
+    return nullptr;
+
+  auto *LoadedLHS = dyn_cast<ConstantExpr>(LoadedCE->getOperand(0));
+  if (!LoadedLHS || LoadedLHS->getOpcode() != Instruction::PtrToInt)
+    return nullptr;
+  auto *LoadedLHSPtr = LoadedLHS->getOperand(0);
+
+  Constant *LoadedRHS = LoadedCE->getOperand(1);
+  GlobalValue *LoadedRHSSym;
+  APInt LoadedRHSOffset;
+  if (!IsConstantOffsetFromGlobal(LoadedRHS, LoadedRHSSym, LoadedRHSOffset,
+                                  DL) ||
+      PtrSym != LoadedRHSSym || PtrOffset != LoadedRHSOffset)
+    return nullptr;
+
+  return ConstantExpr::getBitCast(LoadedLHSPtr, Int8PtrTy);
+}
+
 template <typename IterTy>
 static Value *SimplifyIntrinsic(Function *F, IterTy ArgBegin, IterTy ArgEnd,
                                 const Query &Q, unsigned MaxRecurse) {
@@ -3835,6 +3921,11 @@ static Value *SimplifyIntrinsic(Function *F, IterTy ArgBegin, IterTy ArgEnd,
       if (match(RHS, m_Undef()))
         return Constant::getNullValue(ReturnType);
     }
+
+    if (IID == Intrinsic::load_relative && isa<Constant>(LHS) &&
+        isa<Constant>(RHS))
+      return SimplifyRelativeLoad(cast<Constant>(LHS), cast<Constant>(RHS),
+                                  Q.DL);
   }
 
   // Perform idempotent optimizations

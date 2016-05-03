@@ -84,7 +84,7 @@ LTOCodeGenerator::LTOCodeGenerator(LLVMContext &Context)
     : Context(Context), MergedModule(new Module("ld-temp.o", Context)),
       TheLinker(new Linker(*MergedModule)) {
   Context.setDiscardValueNames(LTODiscardValueNames);
-  Context.ensureDITypeMap();
+  Context.enableDebugTypeODRUniquing();
   initializeLTOPasses();
 }
 
@@ -96,9 +96,9 @@ LTOCodeGenerator::~LTOCodeGenerator() {}
 void LTOCodeGenerator::initializeLTOPasses() {
   PassRegistry &R = *PassRegistry::getPassRegistry();
 
-  initializeInternalizePassPass(R);
+  initializeInternalizeLegacyPassPass(R);
   initializeIPSCCPPass(R);
-  initializeGlobalOptPass(R);
+  initializeGlobalOptLegacyPassPass(R);
   initializeConstantMergePass(R);
   initializeDAHPass(R);
   initializeInstructionCombiningPassPass(R);
@@ -117,7 +117,7 @@ void LTOCodeGenerator::initializeLTOPasses() {
   initializeMergedLoadStoreMotionPass(R);
   initializeGVNLegacyPassPass(R);
   initializeMemCpyOptPass(R);
-  initializeDCEPass(R);
+  initializeDCELegacyPassPass(R);
   initializeCFGSimplifyPassPass(R);
 }
 
@@ -130,6 +130,9 @@ bool LTOCodeGenerator::addModule(LTOModule *Mod) {
   const std::vector<const char *> &undefs = Mod->getAsmUndefinedRefs();
   for (int i = 0, e = undefs.size(); i != e; ++i)
     AsmUndefinedRefs[undefs[i]] = 1;
+
+  // We've just changed the input, so let's make sure we verify it.
+  HasVerifiedInput = false;
 
   return !ret;
 }
@@ -146,6 +149,9 @@ void LTOCodeGenerator::setModule(std::unique_ptr<LTOModule> Mod) {
   const std::vector<const char*> &Undefs = Mod->getAsmUndefinedRefs();
   for (int I = 0, E = Undefs.size(); I != E; ++I)
     AsmUndefinedRefs[Undefs[I]] = 1;
+
+  // We've just changed the input, so let's make sure we verify it.
+  HasVerifiedInput = false;
 }
 
 void LTOCodeGenerator::setTargetOptions(TargetOptions Options) {
@@ -186,6 +192,9 @@ void LTOCodeGenerator::setOptLevel(unsigned Level) {
 bool LTOCodeGenerator::writeMergedModules(const char *Path) {
   if (!determineTarget())
     return false;
+
+  // We always run the verifier once on the merged module.
+  verifyMergedModuleOnce();
 
   // mark which symbols can not be internalized
   applyScopeRestrictions();
@@ -299,7 +308,7 @@ bool LTOCodeGenerator::determineTarget() {
   if (TargetMach)
     return true;
 
-  std::string TripleStr = MergedModule->getTargetTriple();
+  TripleStr = MergedModule->getTargetTriple();
   if (TripleStr.empty()) {
     TripleStr = sys::getDefaultTargetTriple();
     MergedModule->setTargetTriple(TripleStr);
@@ -308,8 +317,8 @@ bool LTOCodeGenerator::determineTarget() {
 
   // create target machine from info for merged modules
   std::string ErrMsg;
-  const Target *march = TargetRegistry::lookupTarget(TripleStr, ErrMsg);
-  if (!march) {
+  MArch = TargetRegistry::lookupTarget(TripleStr, ErrMsg);
+  if (!MArch) {
     emitError(ErrMsg);
     return false;
   }
@@ -329,20 +338,72 @@ bool LTOCodeGenerator::determineTarget() {
       MCpu = "cyclone";
   }
 
-  TargetMach.reset(march->createTargetMachine(TripleStr, MCpu, FeatureStr,
-                                              Options, RelocModel,
-                                              CodeModel::Default, CGOptLevel));
+  TargetMach = createTargetMachine();
   return true;
 }
 
+std::unique_ptr<TargetMachine> LTOCodeGenerator::createTargetMachine() {
+  return std::unique_ptr<TargetMachine>(
+      MArch->createTargetMachine(TripleStr, MCpu, FeatureStr, Options,
+                                 RelocModel, CodeModel::Default, CGOptLevel));
+}
+
+// If a linkonce global is present in the MustPreserveSymbols, we need to make
+// sure we honor this. To force the compiler to not drop it, we turn its linkage
+// to the weak equivalent.
+static void
+preserveDiscardableGVs(Module &TheModule,
+                       function_ref<bool(const GlobalValue &)> mustPreserveGV) {
+  auto mayPreserveGlobal = [&](GlobalValue &GV) {
+    if (!GV.isDiscardableIfUnused() || GV.isDeclaration())
+      return;
+    if (!mustPreserveGV(GV))
+      return;
+    if (GV.hasAvailableExternallyLinkage() || GV.hasLocalLinkage())
+      report_fatal_error("The linker asked LTO to preserve a symbol with an"
+                         "unexpected linkage");
+    GV.setLinkage(GlobalValue::getWeakLinkage(GV.hasLinkOnceODRLinkage()));
+  };
+
+  for (auto &GV : TheModule)
+    mayPreserveGlobal(GV);
+  for (auto &GV : TheModule.globals())
+    mayPreserveGlobal(GV);
+  for (auto &GV : TheModule.aliases())
+    mayPreserveGlobal(GV);
+}
+
 void LTOCodeGenerator::applyScopeRestrictions() {
-  if (ScopeRestrictionsDone || !ShouldInternalize)
+  if (ScopeRestrictionsDone)
+    return;
+
+  // Declare a callback for the internalize pass that will ask for every
+  // candidate GlobalValue if it can be internalized or not.
+  SmallString<64> MangledName;
+  auto mustPreserveGV = [&](const GlobalValue &GV) -> bool {
+    // Unnamed globals can't be mangled, but they can't be preserved either.
+    if (!GV.hasName())
+      return false;
+
+    // Need to mangle the GV as the "MustPreserveSymbols" StringSet is filled
+    // with the linker supplied name, which on Darwin includes a leading
+    // underscore.
+    MangledName.clear();
+    MangledName.reserve(GV.getName().size() + 1);
+    Mangler::getNameWithPrefix(MangledName, GV.getName(),
+                               MergedModule->getDataLayout());
+    return MustPreserveSymbols.count(MangledName);
+  };
+
+  // Preserve linkonce value on linker request
+  preserveDiscardableGVs(*MergedModule, mustPreserveGV);
+
+  if (!ShouldInternalize)
     return;
 
   if (ShouldRestoreGlobalsLinkage) {
     // Record the linkage type of non-local symbols so they can be restored
-    // prior
-    // to module splitting.
+    // prior to module splitting.
     auto RecordLinkage = [&](const GlobalValue &GV) {
       if (!GV.hasAvailableExternallyLinkage() && !GV.hasLocalLinkage() &&
           GV.hasName())
@@ -360,22 +421,7 @@ void LTOCodeGenerator::applyScopeRestrictions() {
   // symbols referenced from asm
   UpdateCompilerUsed(*MergedModule, *TargetMach, AsmUndefinedRefs);
 
-  // Declare a callback for the internalize pass that will ask for every
-  // candidate GlobalValue if it can be internalized or not.
-  Mangler Mangler;
-  SmallString<64> MangledName;
-  auto MustPreserveGV = [&](const GlobalValue &GV) -> bool {
-    // Need to mangle the GV as the "MustPreserveSymbols" StringSet is filled
-    // with the linker supplied name, which on Darwin includes a leading
-    // underscore.
-    MangledName.clear();
-    MangledName.reserve(GV.getName().size() + 1);
-    Mangler::getNameWithPrefix(MangledName, GV.getName(),
-                               MergedModule->getDataLayout());
-    return MustPreserveSymbols.count(MangledName);
-  };
-
-  internalizeModule(*MergedModule, MustPreserveGV);
+  internalizeModule(*MergedModule, mustPreserveGV);
 
   ScopeRestrictionsDone = true;
 }
@@ -409,6 +455,16 @@ void LTOCodeGenerator::restoreLinkageForExternals() {
                 externalize);
 }
 
+void LTOCodeGenerator::verifyMergedModuleOnce() {
+  // Only run on the first call.
+  if (HasVerifiedInput)
+    return;
+  HasVerifiedInput = true;
+
+  if (verifyModule(*MergedModule, &dbgs()))
+    report_fatal_error("Broken module found, compilation aborted!");
+}
+
 /// Optimize merged modules using various IPO passes
 bool LTOCodeGenerator::optimize(bool DisableVerify, bool DisableInline,
                                 bool DisableGVNLoadPRE,
@@ -418,8 +474,7 @@ bool LTOCodeGenerator::optimize(bool DisableVerify, bool DisableInline,
 
   // We always run the verifier once on the merged module, the `DisableVerify`
   // parameter only applies to subsequent verify.
-  if (verifyModule(*MergedModule, &dbgs()))
-    report_fatal_error("Broken module found, compilation aborted!");
+  verifyMergedModuleOnce();
 
   // Mark which symbols can not be internalized
   this->applyScopeRestrictions();
@@ -457,6 +512,10 @@ bool LTOCodeGenerator::compileOptimized(ArrayRef<raw_pwrite_stream *> Out) {
   if (!this->determineTarget())
     return false;
 
+  // We always run the verifier once on the merged module.  If it has already
+  // been called in optimize(), this call will return early.
+  verifyMergedModuleOnce();
+
   legacy::PassManager preCodeGenPasses;
 
   // If the bitcode files contain ARC code and were compiled with optimization,
@@ -473,9 +532,9 @@ bool LTOCodeGenerator::compileOptimized(ArrayRef<raw_pwrite_stream *> Out) {
   // parallelism level 1. This is achieved by having splitCodeGen return the
   // original module at parallelism level 1 which we then assign back to
   // MergedModule.
-  MergedModule = splitCodeGen(
-      std::move(MergedModule), Out, {}, MCpu, FeatureStr, Options, RelocModel,
-      CodeModel::Default, CGOptLevel, FileType, ShouldRestoreGlobalsLinkage);
+  MergedModule = splitCodeGen(std::move(MergedModule), Out, {},
+                              [&]() { return createTargetMachine(); }, FileType,
+                              ShouldRestoreGlobalsLinkage);
 
   // If statistics were requested, print them out after codegen.
   if (llvm::AreStatisticsEnabled())

@@ -14,10 +14,7 @@
 #ifndef LLVM_OBJECT_ELFOBJECTFILE_H
 #define LLVM_OBJECT_ELFOBJECTFILE_H
 
-#include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/PointerIntPair.h"
 #include "llvm/ADT/SmallVector.h"
-#include "llvm/ADT/StringSwitch.h"
 #include "llvm/ADT/Triple.h"
 #include "llvm/Object/ELF.h"
 #include "llvm/Object/ObjectFile.h"
@@ -26,10 +23,8 @@
 #include "llvm/Support/Endian.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MemoryBuffer.h"
-#include "llvm/Support/raw_ostream.h"
 #include <algorithm>
 #include <cctype>
-#include <limits>
 #include <utility>
 
 namespace llvm {
@@ -197,7 +192,7 @@ protected:
   ArrayRef<Elf_Word> ShndxTable;
 
   void moveSymbolNext(DataRefImpl &Symb) const override;
-  ErrorOr<StringRef> getSymbolName(DataRefImpl Symb) const override;
+  Expected<StringRef> getSymbolName(DataRefImpl Symb) const override;
   ErrorOr<uint64_t> getSymbolAddress(DataRefImpl Symb) const override;
   uint64_t getSymbolValueImpl(DataRefImpl Symb) const override;
   uint32_t getSymbolAlignment(DataRefImpl Symb) const override;
@@ -205,10 +200,10 @@ protected:
   uint32_t getSymbolFlags(DataRefImpl Symb) const override;
   uint8_t getSymbolOther(DataRefImpl Symb) const override;
   uint8_t getSymbolELFType(DataRefImpl Symb) const override;
-  ErrorOr<SymbolRef::Type> getSymbolType(DataRefImpl Symb) const override;
-  ErrorOr<section_iterator> getSymbolSection(const Elf_Sym *Symb,
-                                             const Elf_Shdr *SymTab) const;
-  ErrorOr<section_iterator> getSymbolSection(DataRefImpl Symb) const override;
+  Expected<SymbolRef::Type> getSymbolType(DataRefImpl Symb) const override;
+  Expected<section_iterator> getSymbolSection(const Elf_Sym *Symb,
+                                              const Elf_Shdr *SymTab) const;
+  Expected<section_iterator> getSymbolSection(DataRefImpl Symb) const override;
 
   void moveSectionNext(DataRefImpl &Sec) const override;
   std::error_code getSectionName(DataRefImpl Sec,
@@ -354,7 +349,7 @@ void ELFObjectFile<ELFT>::moveSymbolNext(DataRefImpl &Sym) const {
 }
 
 template <class ELFT>
-ErrorOr<StringRef> ELFObjectFile<ELFT>::getSymbolName(DataRefImpl Sym) const {
+Expected<StringRef> ELFObjectFile<ELFT>::getSymbolName(DataRefImpl Sym) const {
   const Elf_Sym *ESym = getSymbol(Sym);
   const Elf_Shdr *SymTableSec = *EF.getSection(Sym.d.a);
   const Elf_Shdr *StringTableSec = *EF.getSection(SymTableSec->sh_link);
@@ -445,7 +440,7 @@ uint8_t ELFObjectFile<ELFT>::getSymbolELFType(DataRefImpl Symb) const {
 }
 
 template <class ELFT>
-ErrorOr<SymbolRef::Type>
+Expected<SymbolRef::Type>
 ELFObjectFile<ELFT>::getSymbolType(DataRefImpl Symb) const {
   const Elf_Sym *ESym = getSymbol(Symb);
 
@@ -488,11 +483,14 @@ uint32_t ELFObjectFile<ELFT>::getSymbolFlags(DataRefImpl Sym) const {
     Result |= SymbolRef::SF_FormatSpecific;
 
   if (EF.getHeader()->e_machine == ELF::EM_ARM) {
-    if (ErrorOr<StringRef> NameOrErr = getSymbolName(Sym)) {
+    if (Expected<StringRef> NameOrErr = getSymbolName(Sym)) {
       StringRef Name = *NameOrErr;
       if (Name.startswith("$d") || Name.startswith("$t") ||
           Name.startswith("$a"))
         Result |= SymbolRef::SF_FormatSpecific;
+    } else {
+      // TODO: Actually report errors helpfully.
+      consumeError(NameOrErr.takeError());
     }
     if (ESym->getType() == ELF::STT_FUNC && (ESym->st_value & 1) == 1)
       Result |= SymbolRef::SF_Thumb;
@@ -514,12 +512,12 @@ uint32_t ELFObjectFile<ELFT>::getSymbolFlags(DataRefImpl Sym) const {
 }
 
 template <class ELFT>
-ErrorOr<section_iterator>
+Expected<section_iterator>
 ELFObjectFile<ELFT>::getSymbolSection(const Elf_Sym *ESym,
                                       const Elf_Shdr *SymTab) const {
   ErrorOr<const Elf_Shdr *> ESecOrErr = EF.getSection(ESym, SymTab, ShndxTable);
   if (std::error_code EC = ESecOrErr.getError())
-    return EC;
+    return errorCodeToError(EC);
 
   const Elf_Shdr *ESec = *ESecOrErr;
   if (!ESec)
@@ -531,7 +529,7 @@ ELFObjectFile<ELFT>::getSymbolSection(const Elf_Sym *ESym,
 }
 
 template <class ELFT>
-ErrorOr<section_iterator>
+Expected<section_iterator>
 ELFObjectFile<ELFT>::getSymbolSection(DataRefImpl Symb) const {
   const Elf_Sym *Sym = getSymbol(Symb);
   const Elf_Shdr *SymTab = *EF.getSection(Symb.d.a);

@@ -111,6 +111,8 @@ public:
     OPC_RecordMemRef,
     OPC_CaptureGlueInput,
     OPC_MoveChild,
+    OPC_MoveChild0, OPC_MoveChild1, OPC_MoveChild2, OPC_MoveChild3,
+    OPC_MoveChild4, OPC_MoveChild5, OPC_MoveChild6, OPC_MoveChild7,
     OPC_MoveParent,
     OPC_CheckSame,
     OPC_CheckChild0Same, OPC_CheckChild1Same,
@@ -144,7 +146,11 @@ public:
     OPC_EmitCopyToReg,
     OPC_EmitNodeXForm,
     OPC_EmitNode,
+    // Space-optimized forms that implicitly encode number of result VTs.
+    OPC_EmitNode0, OPC_EmitNode1, OPC_EmitNode2,
     OPC_MorphNodeTo,
+    // Space-optimized forms that implicitly encode number of result VTs.
+    OPC_MorphNodeTo0, OPC_MorphNodeTo1, OPC_MorphNodeTo2,
     OPC_MarkGlueResults,
     OPC_CompleteMatch
   };

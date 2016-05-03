@@ -308,6 +308,8 @@ llvm::writeArchive(StringRef ArcName,
                    std::vector<NewArchiveIterator> &NewMembers,
                    bool WriteSymtab, object::Archive::Kind Kind,
                    bool Deterministic, bool Thin) {
+  assert((!Thin || Kind == object::Archive::K_GNU) &&
+         "Only the gnu format has a thin mode");
   SmallString<128> TmpArchive;
   int TmpArchiveFD;
   if (auto EC = sys::fs::createUniqueFile(ArcName + ".temp-archive-%%%%%%%.a",
@@ -327,8 +329,7 @@ llvm::writeArchive(StringRef ArcName,
   std::vector<MemoryBufferRef> Members;
   std::vector<sys::fs::file_status> NewMemberStatus;
 
-  for (unsigned I = 0, N = NewMembers.size(); I < N; ++I) {
-    NewArchiveIterator &Member = NewMembers[I];
+  for (NewArchiveIterator &Member : NewMembers) {
     MemoryBufferRef MemberRef;
 
     if (Member.isNewMember()) {

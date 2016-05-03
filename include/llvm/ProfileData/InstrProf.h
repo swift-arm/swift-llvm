@@ -30,7 +30,6 @@
 #include "llvm/Support/MathExtras.h"
 #include <cstdint>
 #include <list>
-#include <map>
 #include <system_error>
 #include <vector>
 
@@ -254,7 +253,7 @@ MDNode *getPGOFuncNameMetadata(const Function &F);
 /// Create the PGOFuncName meta data if PGOFuncName is different from
 /// function's raw name. This should only apply to internal linkage functions
 /// declared by users only.
-void createPGOFuncNameMetadata(Function &F);
+void createPGOFuncNameMetadata(Function &F, const std::string &PGOFuncName);
 
 const std::error_category &instrprof_category();
 

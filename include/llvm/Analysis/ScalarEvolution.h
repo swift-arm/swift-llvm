@@ -26,7 +26,6 @@
 #include "llvm/ADT/SetVector.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/IR/ConstantRange.h"
-#include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Operator.h"
 #include "llvm/IR/PassManager.h"
@@ -35,7 +34,6 @@
 #include "llvm/Pass.h"
 #include "llvm/Support/Allocator.h"
 #include "llvm/Support/DataTypes.h"
-#include <map>
 
 namespace llvm {
   class APInt;
@@ -55,6 +53,7 @@ namespace llvm {
   class SCEVExpander;
   class SCEVPredicate;
   class SCEVUnknown;
+  class Function;
 
   template <> struct FoldingSetTrait<SCEV>;
   template <> struct FoldingSetTrait<SCEVPredicate>;
@@ -1095,6 +1094,24 @@ namespace llvm {
     // about how poison produced from no-wrap flags on this value
     // (e.g. a nuw add) would trigger undefined behavior on overflow.
     SCEV::NoWrapFlags getNoWrapFlagsFromUB(const Value *V);
+
+    /// Return true if the SCEV corresponding to \p I is never poison.  Proving
+    /// this is more complex than proving that just \p I is never poison, since
+    /// SCEV commons expressions across control flow, and you can have cases
+    /// like:
+    ///
+    ///   idx0 = a + b;
+    ///   ptr[idx0] = 100;
+    ///   if (<condition>) {
+    ///     idx1 = a +nsw b;
+    ///     ptr[idx1] = 200;
+    ///   }
+    ///
+    /// where the SCEV expression (+ a b) is guaranteed to not be poison (and
+    /// hence not sign-overflow) only if "<condition>" is true.  Since both
+    /// `idx0` and `idx1` will be mapped to the same SCEV expression, (+ a b),
+    /// it is not okay to annotate (+ a b) with <nsw> in the above example.
+    bool isSCEVExprNeverPoison(const Instruction *I);
 
   public:
     ScalarEvolution(Function &F, TargetLibraryInfo &TLI, AssumptionCache &AC,

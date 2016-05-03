@@ -12,16 +12,14 @@
 #include "FuzzerInterface.h"
 #include "FuzzerInternal.h"
 
-#include <cstring>
-#include <chrono>
-#include <unistd.h>
-#include <thread>
+#include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <cstring>
 #include <mutex>
 #include <string>
-#include <sstream>
-#include <algorithm>
-#include <iterator>
+#include <thread>
+#include <unistd.h>
 
 // This function should be present in the libFuzzer so that the client
 // binary can test for its existence.
@@ -296,6 +294,7 @@ static int FuzzerDriver(const std::vector<std::string> &Args,
   Options.Reload = Flags.reload;
   Options.OnlyASCII = Flags.only_ascii;
   Options.OutputCSV = Flags.output_csv;
+  Options.DetectLeaks = Flags.detect_leaks;
   if (Flags.runs >= 0)
     Options.MaxNumberOfRuns = Flags.runs;
   if (!Inputs->empty())
@@ -378,8 +377,11 @@ static int FuzzerDriver(const std::vector<std::string> &Args,
     F.SetMaxLen(
         std::min(std::max(kMinDefaultLen, F.MaxUnitSizeInCorpus()), kMaxSaneLen));
 
-  if (F.CorpusSize() == 0)
+  if (F.CorpusSize() == 0) {
     F.AddToCorpus(Unit());  // Can't fuzz empty corpus, so add an empty input.
+    if (Options.Verbosity)
+      Printf("INFO: A corpus is not provided, starting from an empty corpus\n");
+  }
   F.ShuffleAndMinimize();
   if (Flags.drill)
     F.Drill();

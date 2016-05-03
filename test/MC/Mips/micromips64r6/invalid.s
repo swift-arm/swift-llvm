@@ -146,3 +146,61 @@
   dmtc0  $4, $3, 8             # CHECK: :[[@LINE]]:18: error: expected 3-bit unsigned immediate
   dmfc0  $4, $3, -1            # CHECK: :[[@LINE]]:18: error: expected 3-bit unsigned immediate
   dmfc0  $4, $3, 8             # CHECK: :[[@LINE]]:18: error: expected 3-bit unsigned immediate
+  tlbp $3                      # CHECK: :[[@LINE]]:8: error: invalid operand for instruction
+  tlbp 5                       # CHECK: :[[@LINE]]:8: error: invalid operand for instruction
+  tlbp $4, 6                   # CHECK: :[[@LINE]]:8: error: invalid operand for instruction
+  tlbr $3                      # CHECK: :[[@LINE]]:8: error: invalid operand for instruction
+  tlbr 5                       # CHECK: :[[@LINE]]:8: error: invalid operand for instruction
+  tlbr $4, 6                   # CHECK: :[[@LINE]]:8: error: invalid operand for instruction
+  tlbwi $3                     # CHECK: :[[@LINE]]:9: error: invalid operand for instruction
+  tlbwi 5                      # CHECK: :[[@LINE]]:9: error: invalid operand for instruction
+  tlbwi $4, 6                  # CHECK: :[[@LINE]]:9: error: invalid operand for instruction
+  tlbwr $3                     # CHECK: :[[@LINE]]:9: error: invalid operand for instruction
+  tlbwr 5                      # CHECK: :[[@LINE]]:9: error: invalid operand for instruction
+  tlbwr $4, 6                  # CHECK: :[[@LINE]]:9: error: invalid operand for instruction
+  dvp 3                        # CHECK: :[[@LINE]]:7: error: invalid operand for instruction
+  dvp $4, 5                    # CHECK: :[[@LINE]]:11: error: invalid operand for instruction
+  evp 3                        # CHECK: :[[@LINE]]:7: error: invalid operand for instruction
+  evp $4, 5                    # CHECK: :[[@LINE]]:11: error: invalid operand for instruction
+  jalrc.hb $31                 # CHECK: :[[@LINE]]:{{[0-9]+}}: error: source and destination must be different
+  jalrc.hb $31, $31            # CHECK: :[[@LINE]]:{{[0-9]+}}: error: source and destination must be different
+  sll $4, $3, -1               # CHECK: :[[@LINE]]:15: error: expected 5-bit unsigned immediate
+  sll $4, $3, 32               # CHECK: :[[@LINE]]:15: error: expected 5-bit unsigned immediate
+  sra $4, $3, -1               # CHECK: :[[@LINE]]:15: error: expected 5-bit unsigned immediate
+  sra $4, $3, 32               # CHECK: :[[@LINE]]:15: error: expected 5-bit unsigned immediate
+  srl $4, $3, -1               # CHECK: :[[@LINE]]:15: error: expected 5-bit unsigned immediate
+  srl $4, $3, 32               # CHECK: :[[@LINE]]:15: error: expected 5-bit unsigned immediate
+  sll $3, -1                   # CHECK: :[[@LINE]]:11: error: expected 5-bit unsigned immediate
+  sll $3, 32                   # CHECK: :[[@LINE]]:11: error: expected 5-bit unsigned immediate
+  sra $3, -1                   # CHECK: :[[@LINE]]:11: error: expected 5-bit unsigned immediate
+  sra $3, 32                   # CHECK: :[[@LINE]]:11: error: expected 5-bit unsigned immediate
+  srl $3, -1                   # CHECK: :[[@LINE]]:11: error: expected 5-bit unsigned immediate
+  srl $3, 32                   # CHECK: :[[@LINE]]:11: error: expected 5-bit unsigned immediate
+  dneg $7, 5                   # CHECK: :[[@LINE]]:12: error: invalid operand for instruction
+  dneg 4                       # CHECK: :[[@LINE]]:8: error: invalid operand for instruction
+  dnegu $1, 3                  # CHECK: :[[@LINE]]:13: error: invalid operand for instruction
+  dnegu 7                      # CHECK: :[[@LINE]]:9: error: invalid operand for instruction
+  lle $33, 8($5)               # CHECK: :[[@LINE]]:7: error: invalid operand for instruction
+  lle $4, 8($33)               # CHECK: :[[@LINE]]:11: error: expected memory with 9-bit signed offset
+  lle $4, 512($5)              # CHECK: :[[@LINE]]:11: error: expected memory with 9-bit signed offset
+  lle $4, -513($5)             # CHECK: :[[@LINE]]:11: error: expected memory with 9-bit signed offset
+  lwe $33, 8($5)               # CHECK: :[[@LINE]]:7: error: invalid operand for instruction
+  lwe $4, 8($33)               # CHECK: :[[@LINE]]:11: error: expected memory with 9-bit signed offset
+  lwe $4, 512($5)              # CHECK: :[[@LINE]]:11: error: expected memory with 9-bit signed offset
+  lwe $4, -513($5)             # CHECK: :[[@LINE]]:11: error: expected memory with 9-bit signed offset
+  sbe $33, 8($5)               # CHECK: :[[@LINE]]:7: error: invalid operand for instruction
+  sbe $4, 8($33)               # CHECK: :[[@LINE]]:11: error: expected memory with 9-bit signed offset
+  sbe $4, 512($5)              # CHECK: :[[@LINE]]:11: error: expected memory with 9-bit signed offset
+  sbe $4, -513($5)             # CHECK: :[[@LINE]]:11: error: expected memory with 9-bit signed offset
+  sce $33, 8($5)               # CHECK: :[[@LINE]]:7: error: invalid operand for instruction
+  sce $4, 8($33)               # CHECK: :[[@LINE]]:11: error: expected memory with 9-bit signed offset
+  sce $4, 512($5)              # CHECK: :[[@LINE]]:11: error: expected memory with 9-bit signed offset
+  sce $4, -513($5)             # CHECK: :[[@LINE]]:11: error: expected memory with 9-bit signed offset
+  she $33, 8($5)               # CHECK: :[[@LINE]]:7: error: invalid operand for instruction
+  she $4, 8($33)               # CHECK: :[[@LINE]]:11: error: expected memory with 9-bit signed offset
+  she $4, 512($5)              # CHECK: :[[@LINE]]:11: error: expected memory with 9-bit signed offset
+  she $4, -513($5)             # CHECK: :[[@LINE]]:11: error: expected memory with 9-bit signed offset
+  swe $33, 8($4)               # CHECK: :[[@LINE]]:7: error: invalid operand for instruction
+  swe $5, 8($34)               # CHECK: :[[@LINE]]:11: error: expected memory with 9-bit signed offset
+  swe $5, 512($4)              # CHECK: :[[@LINE]]:11: error: expected memory with 9-bit signed offset
+  swe $5, -513($4)             # CHECK: :[[@LINE]]:11: error: expected memory with 9-bit signed offset

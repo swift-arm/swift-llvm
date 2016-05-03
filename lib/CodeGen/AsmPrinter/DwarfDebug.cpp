@@ -105,13 +105,21 @@ DwarfPubSections("generate-dwarf-pub-sections", cl::Hidden,
                             clEnumVal(Disable, "Disabled"), clEnumValEnd),
                  cl::init(Default));
 
-static cl::opt<DefaultOnOff>
-DwarfLinkageNames("dwarf-linkage-names", cl::Hidden,
-                  cl::desc("Emit DWARF linkage-name attributes."),
-                  cl::values(clEnumVal(Default, "Default for platform"),
-                             clEnumVal(Enable, "Enabled"),
-                             clEnumVal(Disable, "Disabled"), clEnumValEnd),
-                  cl::init(Default));
+enum LinkageNameOption {
+  DefaultLinkageNames,
+  AllLinkageNames,
+  AbstractLinkageNames
+};
+static cl::opt<LinkageNameOption>
+    DwarfLinkageNames("dwarf-linkage-names", cl::Hidden,
+                      cl::desc("Which DWARF linkage-name attributes to emit."),
+                      cl::values(clEnumValN(DefaultLinkageNames, "Default",
+                                            "Default for platform"),
+                                 clEnumValN(AllLinkageNames, "All", "All"),
+                                 clEnumValN(AbstractLinkageNames, "Abstract",
+                                            "Abstract subprograms"),
+                                 clEnumValEnd),
+                      cl::init(DefaultLinkageNames));
 
 static const char *const DWARFGroupName = "DWARF Emission";
 static const char *const DbgTimerName = "DWARF Debug Writer";
@@ -137,21 +145,13 @@ bool DebugLocDwarfExpression::isFrameRegister(unsigned MachineReg) {
 
 //===----------------------------------------------------------------------===//
 
-/// resolve - Look in the DwarfDebug map for the MDNode that
-/// corresponds to the reference.
-template <typename T> T *DbgVariable::resolve(TypedDINodeRef<T> Ref) const {
-  return DD->resolve(Ref);
-}
-
 bool DbgVariable::isBlockByrefVariable() const {
   assert(Var && "Invalid complex DbgVariable!");
-  return Var->getType()
-      .resolve(DD->getTypeIdentifierMap())
-      ->isBlockByrefStruct();
+  return Var->getType().resolve()->isBlockByrefStruct();
 }
 
 const DIType *DbgVariable::getType() const {
-  DIType *Ty = Var->getType().resolve(DD->getTypeIdentifierMap());
+  DIType *Ty = Var->getType().resolve();
   // FIXME: isBlockByrefVariable should be reformulated in terms of complex
   // addresses instead.
   if (Ty->isBlockByrefStruct()) {
@@ -245,11 +245,11 @@ DwarfDebug::DwarfDebug(AsmPrinter *A, Module *M)
   else
     HasDwarfPubSections = DwarfPubSections == Enable;
 
-  // SCE does not use linkage names.
-  if (DwarfLinkageNames == Default)
-    UseLinkageNames = !tuneForSCE();
+  // SCE defaults to linkage names only for abstract subprograms.
+  if (DwarfLinkageNames == DefaultLinkageNames)
+    UseAllLinkageNames = !tuneForSCE();
   else
-    UseLinkageNames = DwarfLinkageNames == Enable;
+    UseAllLinkageNames = DwarfLinkageNames == AllLinkageNames;
 
   unsigned DwarfVersionNumber = Asm->TM.Options.MCOptions.DwarfVersion;
   DwarfVersion = DwarfVersionNumber ? DwarfVersionNumber
@@ -466,7 +466,6 @@ void DwarfDebug::beginModule() {
 
   const Module *M = MMI->getModule();
 
-  TypeIdentifierMap = generateDITypeIdentifierMap(*M);
   unsigned NumDebugCUs = 0;
   for (DICompileUnit *CUNode : M->debug_compile_units()) {
     (void)CUNode;
@@ -486,12 +485,12 @@ void DwarfDebug::beginModule() {
     for (auto *Ty : CUNode->getEnumTypes()) {
       // The enum types array by design contains pointers to
       // MDNodes rather than DIRefs. Unique them here.
-      CU.getOrCreateTypeDIE(cast<DIType>(resolve(Ty->getRef())));
+      CU.getOrCreateTypeDIE(cast<DIType>(Ty));
     }
     for (auto *Ty : CUNode->getRetainedTypes()) {
       // The retained types array by design contains pointers to
       // MDNodes rather than DIRefs. Unique them here.
-      if (DIType *RT = dyn_cast<DIType>(resolve(Ty->getRef())))
+      if (DIType *RT = dyn_cast<DIType>(Ty))
         if (!RT->isExternalTypeRef())
           // There is no point in force-emitting a forward declaration.
           CU.getOrCreateTypeDIE(RT);
@@ -697,7 +696,7 @@ DbgVariable *DwarfDebug::getExistingAbstractVariable(InlinedVariable IV) {
 
 void DwarfDebug::createAbstractVariable(const DILocalVariable *Var,
                                         LexicalScope *Scope) {
-  auto AbsDbgVariable = make_unique<DbgVariable>(Var, /* IA */ nullptr, this);
+  auto AbsDbgVariable = make_unique<DbgVariable>(Var, /* IA */ nullptr);
   InfoHolder.addScopeVariable(Scope, AbsDbgVariable.get());
   AbstractVariables[Var] = std::move(AbsDbgVariable);
 }
@@ -741,7 +740,7 @@ void DwarfDebug::collectVariableInfoFromMMITable(
       continue;
 
     ensureAbstractVariableIsCreatedIfScoped(Var, Scope->getScopeNode());
-    auto RegVar = make_unique<DbgVariable>(Var.first, Var.second, this);
+    auto RegVar = make_unique<DbgVariable>(Var.first, Var.second);
     RegVar->initializeMMI(VI.Expr, VI.Slot);
     if (InfoHolder.addScopeVariable(Scope, RegVar.get()))
       ConcreteVariables.push_back(std::move(RegVar));
@@ -915,8 +914,7 @@ DwarfDebug::buildLocationList(SmallVectorImpl<DebugLocEntry> &DebugLoc,
 DbgVariable *DwarfDebug::createConcreteVariable(LexicalScope &Scope,
                                                 InlinedVariable IV) {
   ensureAbstractVariableIsCreatedIfScoped(IV, Scope.getScopeNode());
-  ConcreteVariables.push_back(
-      make_unique<DbgVariable>(IV.first, IV.second, this));
+  ConcreteVariables.push_back(make_unique<DbgVariable>(IV.first, IV.second));
   InfoHolder.addScopeVariable(&Scope, ConcreteVariables.back().get());
   return ConcreteVariables.back().get();
 }

@@ -17,6 +17,7 @@
 #include "llvm/CodeGen/CommandFlags.h"
 #include "llvm/IR/DiagnosticPrinter.h"
 #include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Verifier.h"
 #include "llvm/IRReader/IRReader.h"
 #include "llvm/LTO/LTOCodeGenerator.h"
 #include "llvm/LTO/LTOModule.h"
@@ -67,6 +68,7 @@ enum ThinLTOModes {
   THINLINK,
   THINPROMOTE,
   THINIMPORT,
+  THININTERNALIZE,
   THINOPT,
   THINCODEGEN,
   THINALL
@@ -83,6 +85,9 @@ cl::opt<ThinLTOModes> ThinLTOMode(
         clEnumValN(THINIMPORT, "import", "Perform both promotion and "
                                          "cross-module importing (requires "
                                          "-thinlto-index)."),
+        clEnumValN(THININTERNALIZE, "internalize",
+                   "Perform internalization driven by -exported-symbol "
+                   "(requires -thinlto-index)."),
         clEnumValN(THINOPT, "optimize", "Perform ThinLTO optimizations."),
         clEnumValN(THINCODEGEN, "codegen", "CodeGen (expected to match llc)"),
         clEnumValN(THINALL, "run", "Perform ThinLTO end-to-end"),
@@ -104,10 +109,10 @@ static cl::opt<std::string> OutputFilename("o", cl::init(""),
                                            cl::desc("Override output filename"),
                                            cl::value_desc("filename"));
 
-static cl::list<std::string>
-    ExportedSymbols("exported-symbol",
-                    cl::desc("Symbol to export from the resulting object file"),
-                    cl::ZeroOrMore);
+static cl::list<std::string> ExportedSymbols(
+    "exported-symbol",
+    cl::desc("List of symbols to export from the resulting object file"),
+    cl::ZeroOrMore);
 
 static cl::list<std::string>
     DSOSymbols("dso-symbol",
@@ -205,6 +210,11 @@ static void error(const ErrorOr<T> &V, const Twine &Prefix) {
   error(V.getError(), Prefix);
 }
 
+static void maybeVerifyModule(const Module &Mod) {
+  if (!DisableVerify && verifyModule(Mod))
+    error("Broken Module");
+}
+
 static std::unique_ptr<LTOModule>
 getLocalLTOModule(StringRef Path, std::unique_ptr<MemoryBuffer> &Buffer,
                   const TargetOptions &Options) {
@@ -219,6 +229,7 @@ getLocalLTOModule(StringRef Path, std::unique_ptr<MemoryBuffer> &Buffer,
       std::move(Context), Buffer->getBufferStart(), Buffer->getBufferSize(),
       Options, Path);
   CurrentActivity = "";
+  maybeVerifyModule((*Ret)->getModule());
   return std::move(*Ret);
 }
 
@@ -303,6 +314,7 @@ static std::unique_ptr<Module> loadModule(StringRef Filename,
     Err.print("llvm-lto", errs());
     report_fatal_error("Can't load module for file " + Filename);
   }
+  maybeVerifyModule(*M);
   return M;
 }
 
@@ -310,6 +322,7 @@ static void writeModuleToFile(Module &TheModule, StringRef Filename) {
   std::error_code EC;
   raw_fd_ostream OS(Filename, EC, sys::fs::OpenFlags::F_None);
   error(EC, "error opening the file '" + Filename + "'");
+  maybeVerifyModule(TheModule);
   WriteBitcodeToFile(&TheModule, OS, /* ShouldPreserveUseListOrder */ true);
 }
 
@@ -320,6 +333,10 @@ public:
   ThinLTOProcessing(const TargetOptions &Options) {
     ThinGenerator.setCodePICModel(RelocModel);
     ThinGenerator.setTargetOptions(Options);
+
+    // Add all the exported symbols to the table of symbols to preserve.
+    for (unsigned i = 0; i < ExportedSymbols.size(); ++i)
+      ThinGenerator.preserveSymbol(ExportedSymbols[i]);
   }
 
   void run() {
@@ -330,6 +347,8 @@ public:
       return promote();
     case THINIMPORT:
       return import();
+    case THININTERNALIZE:
+      return internalize();
     case THINOPT:
       return optimize();
     case THINCODEGEN:
@@ -418,6 +437,37 @@ private:
       std::string OutputName = OutputFilename;
       if (OutputName.empty()) {
         OutputName = Filename + ".thinlto.imported.bc";
+      }
+      writeModuleToFile(*TheModule, OutputName);
+    }
+  }
+
+  void internalize() {
+    if (InputFilenames.size() != 1 && !OutputFilename.empty())
+      report_fatal_error("Can't handle a single output filename and multiple "
+                         "input files, do not provide an output filename and "
+                         "the output files will be suffixed from the input "
+                         "ones.");
+
+    if (ExportedSymbols.empty())
+      errs() << "Warning: -internalize will not perform without "
+                "-exported-symbol\n";
+
+    auto Index = loadCombinedIndex();
+    auto InputBuffers = loadAllFilesForIndex(*Index);
+    for (auto &MemBuffer : InputBuffers)
+      ThinGenerator.addModule(MemBuffer->getBufferIdentifier(),
+                              MemBuffer->getBuffer());
+
+    for (auto &Filename : InputFilenames) {
+      LLVMContext Ctx;
+      auto TheModule = loadModule(Filename, Ctx);
+
+      ThinGenerator.internalize(*TheModule, *Index);
+
+      std::string OutputName = OutputFilename;
+      if (OutputName.empty()) {
+        OutputName = Filename + ".thinlto.internalized.bc";
       }
       writeModuleToFile(*TheModule, OutputName);
     }

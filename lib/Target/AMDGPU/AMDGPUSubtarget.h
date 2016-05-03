@@ -17,11 +17,10 @@
 
 #include "AMDGPU.h"
 #include "AMDGPUFrameLowering.h"
-#include "AMDGPUInstrInfo.h"
 #include "AMDGPUISelLowering.h"
+#include "AMDGPUInstrInfo.h"
 #include "AMDGPUSubtarget.h"
 #include "Utils/AMDGPUBaseInfo.h"
-#include "llvm/ADT/StringRef.h"
 #include "llvm/CodeGen/GlobalISel/GISelAccessor.h"
 #include "llvm/Target/TargetSubtargetInfo.h"
 
@@ -30,6 +29,7 @@
 
 namespace llvm {
 
+class StringRef;
 class SIMachineFunctionInfo;
 
 class AMDGPUSubtarget : public AMDGPUGenSubtargetInfo {
@@ -95,6 +95,8 @@ private:
   int LDSBankCount;
   unsigned IsaVersion;
   bool EnableSIScheduler;
+  bool DebuggerInsertNops;
+  bool DebuggerReserveTrapVGPRs;
 
   std::unique_ptr<AMDGPUFrameLowering> FrameLowering;
   std::unique_ptr<AMDGPUTargetLowering> TLInfo;
@@ -302,6 +304,14 @@ public:
 
   bool enableSIScheduler() const {
     return EnableSIScheduler;
+  }
+
+  bool debuggerInsertNops() const {
+    return DebuggerInsertNops;
+  }
+
+  bool debuggerReserveTrapVGPRs() const {
+    return DebuggerReserveTrapVGPRs;
   }
 
   bool dumpCode() const {

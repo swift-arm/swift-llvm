@@ -512,8 +512,16 @@ bool X86FastISel::X86FastEmitStore(EVT VT, unsigned ValReg, bool ValIsKill,
     break;
   }
 
+  const MCInstrDesc &Desc = TII.get(Opc);
+  // Some of the instructions in the previous switch use FR128 instead
+  // of FR32 for ValReg. Make sure the register we feed the instruction
+  // matches its register class constraints.
+  // Note: This is fine to do a copy from FR32 to FR128, this is the
+  // same registers behind the scene and actually why it did not trigger
+  // any bugs before.
+  ValReg = constrainOperandRegClass(Desc, ValReg, Desc.getNumOperands() - 1);
   MachineInstrBuilder MIB =
-    BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DbgLoc, TII.get(Opc));
+      BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DbgLoc, Desc);
   addFullAddress(MIB, AM).addReg(ValReg, getKillRegState(ValIsKill));
   if (MMO)
     MIB->addMemOperand(*FuncInfo.MF, MMO);
@@ -1121,11 +1129,14 @@ bool X86FastISel::X86SelectRet(const Instruction *I) {
     RetRegs.push_back(VA.getLocReg());
   }
 
+  // Swift calling convention does not require we copy the sret argument
+  // into %rax/%eax for the return, and SRetReturnReg is not set for Swift.
+
   // All x86 ABIs require that for returning structs by value we copy
   // the sret argument into %rax/%eax (depending on ABI) for the return.
   // We saved the argument into a virtual register in the entry block,
   // so now we copy the value out and into %rax/%eax.
-  if (F.hasStructRetAttr()) {
+  if (F.hasStructRetAttr() && CC != CallingConv::Swift) {
     unsigned Reg = X86MFInfo->getSRetReturnReg();
     assert(Reg &&
            "SRetReturnReg should have been set in LowerFormalArguments()!");
@@ -3157,25 +3168,10 @@ bool X86FastISel::fastLowerCall(CallLoweringInfo &CLI) {
     unsigned CallOpc = Is64Bit ? X86::CALL64pcrel32 : X86::CALLpcrel32;
 
     // See if we need any target-specific flags on the GV operand.
-    unsigned char OpFlags = 0;
-
-    // On ELF targets, in both X86-64 and X86-32 mode, direct calls to
-    // external symbols most go through the PLT in PIC mode.  If the symbol
-    // has hidden or protected visibility, or if it is static or local, then
-    // we don't need to use the PLT - we can directly call it.
-    if (Subtarget->isTargetELF() &&
-        TM.getRelocationModel() == Reloc::PIC_ &&
-        GV->hasDefaultVisibility() && !GV->hasLocalLinkage()) {
-      OpFlags = X86II::MO_PLT;
-    } else if (Subtarget->isPICStyleStubAny() &&
-               !GV->isStrongDefinitionForLinker() &&
-               (!Subtarget->getTargetTriple().isMacOSX() ||
-                Subtarget->getTargetTriple().isMacOSXVersionLT(10, 5))) {
-      // PC-relative references to external symbols should go through $stub,
-      // unless we're building with the leopard linker or later, which
-      // automatically synthesizes these stubs.
-      OpFlags = X86II::MO_DARWIN_STUB;
-    }
+    unsigned char OpFlags = Subtarget->classifyGlobalFunctionReference(GV, TM);
+    // Ignore NonLazyBind attribute in FastISel
+    if (OpFlags == X86II::MO_GOTPCREL)
+      OpFlags = 0;
 
     MIB = BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DbgLoc, TII.get(CallOpc));
     if (Symbol)
