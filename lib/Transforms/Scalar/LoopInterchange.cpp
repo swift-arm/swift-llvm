@@ -15,7 +15,6 @@
 
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/AliasAnalysis.h"
-#include "llvm/Analysis/AliasSetTracker.h"
 #include "llvm/Analysis/AssumptionCache.h"
 #include "llvm/Analysis/BlockFrequencyInfo.h"
 #include "llvm/Analysis/CodeMetrics.h"
@@ -72,7 +71,7 @@ void printDepMatrix(CharMatrix &DepMatrix) {
 #endif
 
 static bool populateDependencyMatrix(CharMatrix &DepMatrix, unsigned Level,
-                                     Loop *L, DependenceAnalysis *DA) {
+                                     Loop *L, DependenceInfo *DI) {
   typedef SmallVector<Value *, 16> ValueVector;
   ValueVector MemInstr;
 
@@ -117,7 +116,7 @@ static bool populateDependencyMatrix(CharMatrix &DepMatrix, unsigned Level,
         continue;
       if (isa<LoadInst>(Src) && isa<LoadInst>(Des))
         continue;
-      if (auto D = DA->depends(Src, Des, true)) {
+      if (auto D = DI->depends(Src, Des, true)) {
         DEBUG(dbgs() << "Found Dependency between Src=" << Src << " Des=" << Des
                      << "\n");
         if (D->isFlow()) {
@@ -404,12 +403,9 @@ public:
 
 private:
   void splitInnerLoopLatch(Instruction *);
-  void splitOuterLoopLatch();
   void splitInnerLoopHeader();
   bool adjustLoopLinks();
   void adjustLoopPreheaders();
-  void adjustOuterLoopPreheader();
-  void adjustInnerLoopPreheader();
   bool adjustLoopBranches();
   void updateIncomingBlock(BasicBlock *CurrBlock, BasicBlock *OldPred,
                            BasicBlock *NewPred);
@@ -430,11 +426,11 @@ struct LoopInterchange : public FunctionPass {
   static char ID;
   ScalarEvolution *SE;
   LoopInfo *LI;
-  DependenceAnalysis *DA;
+  DependenceInfo *DI;
   DominatorTree *DT;
   bool PreserveLCSSA;
   LoopInterchange()
-      : FunctionPass(ID), SE(nullptr), LI(nullptr), DA(nullptr), DT(nullptr) {
+      : FunctionPass(ID), SE(nullptr), LI(nullptr), DI(nullptr), DT(nullptr) {
     initializeLoopInterchangePass(*PassRegistry::getPassRegistry());
   }
 
@@ -443,15 +439,18 @@ struct LoopInterchange : public FunctionPass {
     AU.addRequired<AAResultsWrapperPass>();
     AU.addRequired<DominatorTreeWrapperPass>();
     AU.addRequired<LoopInfoWrapperPass>();
-    AU.addRequired<DependenceAnalysis>();
+    AU.addRequired<DependenceAnalysisWrapperPass>();
     AU.addRequiredID(LoopSimplifyID);
     AU.addRequiredID(LCSSAID);
   }
 
   bool runOnFunction(Function &F) override {
+    if (skipFunction(F))
+      return false;
+
     SE = &getAnalysis<ScalarEvolutionWrapperPass>().getSE();
     LI = &getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
-    DA = &getAnalysis<DependenceAnalysis>();
+    DI = &getAnalysis<DependenceAnalysisWrapperPass>().getDI();
     auto *DTWP = getAnalysisIfAvailable<DominatorTreeWrapperPass>();
     DT = DTWP ? &DTWP->getDomTree() : nullptr;
     PreserveLCSSA = mustPreserveAnalysisID(LCSSAID);
@@ -491,7 +490,7 @@ struct LoopInterchange : public FunctionPass {
     return true;
   }
 
-  unsigned selectLoopForInterchange(LoopVector LoopList) {
+  unsigned selectLoopForInterchange(const LoopVector &LoopList) {
     // TODO: Add a better heuristic to select the loop to be interchanged based
     // on the dependence matrix. Currently we select the innermost loop.
     return LoopList.size() - 1;
@@ -515,7 +514,7 @@ struct LoopInterchange : public FunctionPass {
                  << "\n");
 
     if (!populateDependencyMatrix(DependencyMatrix, LoopList.size(),
-                                  OuterMostLoop, DA)) {
+                                  OuterMostLoop, DI)) {
       DEBUG(dbgs() << "Populating Dependency matrix failed\n");
       return false;
     }
@@ -813,7 +812,6 @@ bool LoopInterchangeLegality::currentLimitations() {
   //      A[j+1][i+2] = A[j][i]+k;
   //  }
   // }
-  bool FoundInduction = false;
   Instruction *InnerIndexVarInc = nullptr;
   if (InnerInductionVar->getIncomingBlock(0) == InnerLoopPreHeader)
     InnerIndexVarInc =
@@ -829,17 +827,17 @@ bool LoopInterchangeLegality::currentLimitations() {
   // we do not have any instruction between the induction variable and branch
   // instruction.
 
-  for (auto I = InnerLoopLatch->rbegin(), E = InnerLoopLatch->rend();
-       I != E && !FoundInduction; ++I) {
-    if (isa<BranchInst>(*I) || isa<CmpInst>(*I) || isa<TruncInst>(*I))
+  bool FoundInduction = false;
+  for (const Instruction &I : reverse(*InnerLoopLatch)) {
+    if (isa<BranchInst>(I) || isa<CmpInst>(I) || isa<TruncInst>(I))
       continue;
-    const Instruction &Ins = *I;
     // We found an instruction. If this is not induction variable then it is not
     // safe to split this loop latch.
-    if (!Ins.isIdenticalTo(InnerIndexVarInc))
+    if (!I.isIdenticalTo(InnerIndexVarInc))
       return true;
-    else
-      FoundInduction = true;
+
+    FoundInduction = true;
+    break;
   }
   // The loop latch ended and we didn't find the induction variable return as
   // current limitation.
@@ -1073,13 +1071,6 @@ void LoopInterchangeTransform::splitInnerLoopLatch(Instruction *Inc) {
   InnerLoopLatch = SplitBlock(InnerLoopLatchPred, Inc, DT, LI);
 }
 
-void LoopInterchangeTransform::splitOuterLoopLatch() {
-  BasicBlock *OuterLoopLatch = OuterLoop->getLoopLatch();
-  BasicBlock *OuterLatchLcssaPhiBlock = OuterLoopLatch;
-  OuterLoopLatch = SplitBlock(OuterLatchLcssaPhiBlock,
-                              OuterLoopLatch->getFirstNonPHI(), DT, LI);
-}
-
 void LoopInterchangeTransform::splitInnerLoopHeader() {
 
   // Split the inner loop header out. Here make sure that the reduction PHI's
@@ -1122,20 +1113,6 @@ static void moveBBContents(BasicBlock *FromBB, Instruction *InsertBefore) {
 
   ToList.splice(InsertBefore->getIterator(), FromList, FromList.begin(),
                 FromBB->getTerminator()->getIterator());
-}
-
-void LoopInterchangeTransform::adjustOuterLoopPreheader() {
-  BasicBlock *OuterLoopPreHeader = OuterLoop->getLoopPreheader();
-  BasicBlock *InnerPreHeader = InnerLoop->getLoopPreheader();
-
-  moveBBContents(OuterLoopPreHeader, InnerPreHeader->getTerminator());
-}
-
-void LoopInterchangeTransform::adjustInnerLoopPreheader() {
-  BasicBlock *InnerLoopPreHeader = InnerLoop->getLoopPreheader();
-  BasicBlock *OuterHeader = OuterLoop->getHeader();
-
-  moveBBContents(InnerLoopPreHeader, OuterHeader->getTerminator());
 }
 
 void LoopInterchangeTransform::updateIncomingBlock(BasicBlock *CurrBlock,
@@ -1294,11 +1271,11 @@ char LoopInterchange::ID = 0;
 INITIALIZE_PASS_BEGIN(LoopInterchange, "loop-interchange",
                       "Interchanges loops for cache reuse", false, false)
 INITIALIZE_PASS_DEPENDENCY(AAResultsWrapperPass)
-INITIALIZE_PASS_DEPENDENCY(DependenceAnalysis)
+INITIALIZE_PASS_DEPENDENCY(DependenceAnalysisWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(ScalarEvolutionWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(LoopSimplify)
-INITIALIZE_PASS_DEPENDENCY(LCSSA)
+INITIALIZE_PASS_DEPENDENCY(LCSSAWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(LoopInfoWrapperPass)
 
 INITIALIZE_PASS_END(LoopInterchange, "loop-interchange",

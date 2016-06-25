@@ -160,3 +160,81 @@ define i32 @trunc_bitcast3(<4 x i32> %v) {
 ; CHECK-NEXT:  ret i32 %ext
 }
 
+; CHECK-LABEL: @trunc_shl_infloop(
+; CHECK: %tmp = lshr i64 %arg, 1
+; CHECK: %tmp21 = shl i64 %tmp, 2
+; CHECK: %tmp2 = trunc i64 %tmp21 to i32
+; CHECK: icmp sgt i32 %tmp2, 0
+define void @trunc_shl_infloop(i64 %arg) {
+bb:
+  %tmp = lshr i64 %arg, 1
+  %tmp1 = trunc i64 %tmp to i32
+  %tmp2 = shl i32 %tmp1, 2
+  %tmp3 = icmp sgt i32 %tmp2, 0
+  br i1 %tmp3, label %bb2, label %bb1
+
+bb1:
+  %tmp5 = sub i32 0, %tmp1
+  %tmp6 = sub i32 %tmp5, 1
+  unreachable
+
+bb2:
+  unreachable
+}
+
+declare void @consume(i8) readonly
+define i1 @trunc_load_store(i8* align 2 %a) {
+  store i8 0, i8 *%a, align 2
+  %bca  = bitcast i8* %a to i16*
+  %wide.load = load i16, i16* %bca, align 2
+  %lowhalf.1 = trunc i16 %wide.load to i8
+  call void @consume(i8 %lowhalf.1)
+  %cmp.2 = icmp ult i16 %wide.load, 256
+  ret i1 %cmp.2
+; CHECK-LABEL: @trunc_load_store
+; CHECK-NOT: trunc
+; CHECK: call void @consume(i8 0)
+}
+
+
+; The trunc can be replaced with the load value.
+define i1 @trunc_load_load(i8* align 2 %a) {
+  %pload = load i8, i8* %a, align 2
+  %bca  = bitcast i8* %a to i16*
+  %wide.load = load i16, i16* %bca, align 2
+  %lowhalf = trunc i16 %wide.load to i8
+  call void @consume(i8 %lowhalf)
+  call void @consume(i8 %pload)
+  %cmp.2 = icmp ult i16 %wide.load, 256
+  ret i1 %cmp.2
+; CHECK-LABEL: @trunc_load_load
+; CHECK-NOT: trunc
+}
+
+; trunc should not be replaced since atomic load %wide.load has more than one use.
+; different values can be seen by the uses of %wide.load in case of race.
+define i1 @trunc_atomic_loads(i8* align 2 %a) {
+  %pload = load atomic i8, i8* %a unordered, align 2
+  %bca  = bitcast i8* %a to i16*
+  %wide.load = load atomic i16, i16* %bca unordered, align 2
+  %lowhalf = trunc i16 %wide.load to i8
+  call void @consume(i8 %lowhalf)
+  call void @consume(i8 %pload)
+  %cmp.2 = icmp ult i16 %wide.load, 256
+  ret i1 %cmp.2
+; CHECK-LABEL: @trunc_atomic_loads
+; CHECK: trunc
+}
+
+; trunc cannot be replaced since store size is not trunc result size
+define i1 @trunc_different_size_load(i16 * align 2 %a) {
+  store i16 0, i16 *%a, align 2
+  %bca  = bitcast i16* %a to i32*
+  %wide.load = load i32, i32* %bca, align 2
+  %lowhalf = trunc i32 %wide.load to i8
+  call void @consume(i8 %lowhalf)
+  %cmp.2 = icmp ult i32 %wide.load, 256
+  ret i1 %cmp.2
+; CHECK-LABEL: @trunc_different_size_load
+; CHECK: %lowhalf = trunc i32 %wide.load to i8
+}

@@ -46,27 +46,35 @@ public:
       report_fatal_error("Unknown symbol in relocation");
 
     Expected<StringRef> TargetNameOrErr = Symbol->getName();
-    if (!TargetNameOrErr) {
-      std::string Buf;
-      raw_string_ostream OS(Buf);
-      logAllUnhandledErrors(TargetNameOrErr.takeError(), OS, "");
-      OS.flush();
-      report_fatal_error(Buf);
-    }
+    if (!TargetNameOrErr)
+      return TargetNameOrErr.takeError();
     StringRef TargetName = *TargetNameOrErr;
 
     auto SectionOrErr = Symbol->getSection();
-    if (!SectionOrErr) {
-      std::string Buf;
-      raw_string_ostream OS(Buf);
-      logAllUnhandledErrors(SectionOrErr.takeError(), OS, "");
-      OS.flush();
-      report_fatal_error(Buf);
-    }
+    if (!SectionOrErr)
+      return SectionOrErr.takeError();
     auto Section = *SectionOrErr;
 
     uint64_t RelType = RelI->getType();
     uint64_t Offset = RelI->getOffset();
+
+    // Determine the Addend used to adjust the relocation value.
+    uint64_t Addend = 0;
+    SectionEntry &AddendSection = Sections[SectionID];
+    uintptr_t ObjTarget = AddendSection.getObjAddress() + Offset;
+    uint8_t *Displacement = (uint8_t *)ObjTarget;
+
+    switch (RelType) {
+    case COFF::IMAGE_REL_I386_DIR32:
+    case COFF::IMAGE_REL_I386_DIR32NB:
+    case COFF::IMAGE_REL_I386_SECREL:
+    case COFF::IMAGE_REL_I386_REL32: {
+      Addend = readBytesUnaligned(Displacement, 4);
+      break;
+    }
+    default:
+      break;
+    }
 
 #if !defined(NDEBUG)
     SmallString<32> RelTypeName;
@@ -74,7 +82,7 @@ public:
 #endif
     DEBUG(dbgs() << "\t\tIn Section " << SectionID << " Offset " << Offset
                  << " RelType: " << RelTypeName << " TargetName: " << TargetName
-                 << "\n");
+                 << " Addend " << Addend << "\n");
 
     unsigned TargetSectionID = -1;
     if (Section == Obj.section_end()) {
@@ -95,7 +103,7 @@ public:
       case COFF::IMAGE_REL_I386_DIR32NB:
       case COFF::IMAGE_REL_I386_REL32: {
         RelocationEntry RE =
-            RelocationEntry(SectionID, Offset, RelType, 0, TargetSectionID,
+            RelocationEntry(SectionID, Offset, RelType, Addend, TargetSectionID,
                             getSymbolOffset(*Symbol), 0, 0, false, 0);
         addRelocationForSection(RE, TargetSectionID);
         break;
@@ -108,7 +116,7 @@ public:
       }
       case COFF::IMAGE_REL_I386_SECREL: {
         RelocationEntry RE = RelocationEntry(SectionID, Offset, RelType,
-                                             getSymbolOffset(*Symbol));
+                                             getSymbolOffset(*Symbol) + Addend);
         addRelocationForSection(RE, TargetSectionID);
         break;
       }

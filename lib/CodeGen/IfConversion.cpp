@@ -34,6 +34,7 @@
 #include "llvm/Target/TargetRegisterInfo.h"
 #include "llvm/Target/TargetSubtargetInfo.h"
 #include <algorithm>
+#include <utility>
 
 using namespace llvm;
 
@@ -162,7 +163,6 @@ namespace {
     const TargetLoweringBase *TLI;
     const TargetInstrInfo *TII;
     const TargetRegisterInfo *TRI;
-    const MachineBlockFrequencyInfo *MBFI;
     const MachineBranchProbabilityInfo *MBPI;
     MachineRegisterInfo *MRI;
 
@@ -177,7 +177,7 @@ namespace {
   public:
     static char ID;
     IfConverter(std::function<bool(const Function &)> Ftor = nullptr)
-        : MachineFunctionPass(ID), FnNum(-1), PredicateFtor(Ftor) {
+        : MachineFunctionPass(ID), FnNum(-1), PredicateFtor(std::move(Ftor)) {
       initializeIfConverterPass(*PassRegistry::getPassRegistry());
     }
 
@@ -282,14 +282,15 @@ INITIALIZE_PASS_DEPENDENCY(MachineBranchProbabilityInfo)
 INITIALIZE_PASS_END(IfConverter, "if-converter", "If Converter", false, false)
 
 bool IfConverter::runOnMachineFunction(MachineFunction &MF) {
-  if (PredicateFtor && !PredicateFtor(*MF.getFunction()))
+  if (skipFunction(*MF.getFunction()) ||
+      (PredicateFtor && !PredicateFtor(*MF.getFunction())))
     return false;
 
   const TargetSubtargetInfo &ST = MF.getSubtarget();
   TLI = ST.getTargetLowering();
   TII = ST.getInstrInfo();
   TRI = ST.getRegisterInfo();
-  MBFI = &getAnalysis<MachineBlockFrequencyInfo>();
+  BranchFolder::MBFIWrapper MBFI(getAnalysis<MachineBlockFrequencyInfo>());
   MBPI = &getAnalysis<MachineBranchProbabilityInfo>();
   MRI = &MF.getRegInfo();
   SchedModel.init(ST.getSchedModel(), &ST, TII);
@@ -301,7 +302,7 @@ bool IfConverter::runOnMachineFunction(MachineFunction &MF) {
   bool BFChange = false;
   if (!PreRegAlloc) {
     // Tail merge tend to expose more if-conversion opportunities.
-    BranchFolder BF(true, false, *MBFI, *MBPI);
+    BranchFolder BF(true, false, MBFI, *MBPI);
     BFChange = BF.OptimizeFunction(MF, TII, ST.getRegisterInfo(),
                                    getAnalysisIfAvailable<MachineModuleInfo>());
   }
@@ -425,7 +426,7 @@ bool IfConverter::runOnMachineFunction(MachineFunction &MF) {
   BBAnalysis.clear();
 
   if (MadeChange && IfCvtBranchFold) {
-    BranchFolder BF(false, false, *MBFI, *MBPI);
+    BranchFolder BF(false, false, MBFI, *MBPI);
     BF.OptimizeFunction(MF, TII, MF.getSubtarget().getRegisterInfo(),
                         getAnalysisIfAvailable<MachineModuleInfo>());
   }
@@ -1045,8 +1046,19 @@ void IfConverter::RemoveExtraEdges(BBInfo &BBI) {
 }
 
 /// Behaves like LiveRegUnits::StepForward() but also adds implicit uses to all
-/// values defined in MI which are not live/used by MI.
+/// values defined in MI which are also live/used by MI.
 static void UpdatePredRedefs(MachineInstr &MI, LivePhysRegs &Redefs) {
+  const TargetRegisterInfo *TRI = MI.getParent()->getParent()
+    ->getSubtarget().getRegisterInfo();
+
+  // Before stepping forward past MI, remember which regs were live
+  // before MI. This is needed to set the Undef flag only when reg is
+  // dead.
+  SparseSet<unsigned> LiveBeforeMI;
+  LiveBeforeMI.setUniverse(TRI->getNumRegs());
+  for (auto &Reg : Redefs)
+    LiveBeforeMI.insert(Reg);
+
   SmallVector<std::pair<unsigned, const MachineOperand*>, 4> Clobbers;
   Redefs.stepForward(MI, Clobbers);
 
@@ -1060,7 +1072,8 @@ static void UpdatePredRedefs(MachineInstr &MI, LivePhysRegs &Redefs) {
     if (Op.isRegMask()) {
       // First handle regmasks.  They clobber any entries in the mask which
       // means that we need a def for those registers.
-      MIB.addReg(Reg.first, RegState::Implicit | RegState::Undef);
+      if (LiveBeforeMI.count(Reg.first))
+        MIB.addReg(Reg.first, RegState::Implicit);
 
       // We also need to add an implicit def of this register for the later
       // use to read from.
@@ -1077,7 +1090,8 @@ static void UpdatePredRedefs(MachineInstr &MI, LivePhysRegs &Redefs) {
       if (Redefs.contains(Op.getReg()))
         Op.setIsDead(false);
     }
-    MIB.addReg(Reg.first, RegState::Implicit | RegState::Undef);
+    if (LiveBeforeMI.count(Reg.first))
+      MIB.addReg(Reg.first, RegState::Implicit);
   }
 }
 
@@ -1839,5 +1853,5 @@ void IfConverter::MergeBlocks(BBInfo &ToBBI, BBInfo &FromBBI, bool AddEdges) {
 
 FunctionPass *
 llvm::createIfConverter(std::function<bool(const Function &)> Ftor) {
-  return new IfConverter(Ftor);
+  return new IfConverter(std::move(Ftor));
 }

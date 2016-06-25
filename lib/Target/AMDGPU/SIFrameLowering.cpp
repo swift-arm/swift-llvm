@@ -11,6 +11,8 @@
 #include "SIInstrInfo.h"
 #include "SIMachineFunctionInfo.h"
 #include "SIRegisterInfo.h"
+#include "AMDGPUSubtarget.h"
+
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
@@ -26,8 +28,8 @@ static bool hasOnlySGPRSpills(const SIMachineFunctionInfo *FuncInfo,
 }
 
 static ArrayRef<MCPhysReg> getAllSGPR128() {
-  return makeArrayRef(AMDGPU::SReg_128RegClass.begin(),
-                      AMDGPU::SReg_128RegClass.getNumRegs());
+  return makeArrayRef(AMDGPU::SGPR_128RegClass.begin(),
+                      AMDGPU::SGPR_128RegClass.getNumRegs());
 }
 
 static ArrayRef<MCPhysReg> getAllSGPRs() {
@@ -52,10 +54,9 @@ void SIFrameLowering::emitPrologue(MachineFunction &MF,
   if (hasOnlySGPRSpills(MFI, MF.getFrameInfo()))
     return;
 
-  const SIInstrInfo *TII =
-      static_cast<const SIInstrInfo *>(MF.getSubtarget().getInstrInfo());
+  const SISubtarget &ST = MF.getSubtarget<SISubtarget>();
+  const SIInstrInfo *TII = ST.getInstrInfo();
   const SIRegisterInfo *TRI = &TII->getRegisterInfo();
-  const AMDGPUSubtarget &ST = MF.getSubtarget<AMDGPUSubtarget>();
   MachineRegisterInfo &MRI = MF.getRegInfo();
   MachineBasicBlock::iterator I = MBB.begin();
 
@@ -184,8 +185,9 @@ void SIFrameLowering::emitPrologue(MachineFunction &MF,
         // Pick the first unallocated SGPR. Be careful not to pick an alias of the
         // scratch descriptor, since we haven’t added its uses yet.
         if (!MRI.isPhysRegUsed(Reg)) {
-          assert(MRI.isAllocatable(Reg) &&
-                !TRI->isSubRegisterEq(ScratchRsrcReg, Reg));
+          if (!MRI.isAllocatable(Reg) ||
+              TRI->isSubRegisterEq(ScratchRsrcReg, Reg))
+            continue;
 
           MRI.replaceRegWith(ScratchWaveOffsetReg, Reg);
           ScratchWaveOffsetReg = Reg;
@@ -260,6 +262,11 @@ void SIFrameLowering::emitPrologue(MachineFunction &MF,
     OtherBB.addLiveIn(ScratchRsrcReg);
     OtherBB.addLiveIn(ScratchWaveOffsetReg);
   }
+}
+
+void SIFrameLowering::emitEpilogue(MachineFunction &MF,
+                                   MachineBasicBlock &MBB) const {
+
 }
 
 void SIFrameLowering::processFunctionBeforeFrameFinalized(

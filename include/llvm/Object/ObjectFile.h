@@ -15,6 +15,7 @@
 #define LLVM_OBJECT_OBJECTFILE_H
 
 #include "llvm/ADT/StringRef.h"
+#include "llvm/MC/SubtargetFeature.h"
 #include "llvm/Object/SymbolicFile.h"
 #include "llvm/Support/DataTypes.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -89,6 +90,7 @@ public:
   /// @brief Get the alignment of this section as the actual value (not log 2).
   uint64_t getAlignment() const;
 
+  bool isCompressed() const;
   bool isText() const;
   bool isData() const;
   bool isBSS() const;
@@ -214,6 +216,7 @@ protected:
   virtual std::error_code getSectionContents(DataRefImpl Sec,
                                              StringRef &Res) const = 0;
   virtual uint64_t getSectionAlignment(DataRefImpl Sec) const = 0;
+  virtual bool isSectionCompressed(DataRefImpl Sec) const = 0;
   virtual bool isSectionText(DataRefImpl Sec) const = 0;
   virtual bool isSectionData(DataRefImpl Sec) const = 0;
   virtual bool isSectionBSS(DataRefImpl Sec) const = 0;
@@ -260,6 +263,7 @@ public:
 
   virtual StringRef getFileFormatName() const = 0;
   virtual /* Triple::ArchType */ unsigned getArch() const = 0;
+  virtual SubtargetFeatures getFeatures() const = 0;
 
   /// Returns platform-specific object flags, if any.
   virtual std::error_code getPlatformFlags(unsigned &Result) const {
@@ -378,6 +382,10 @@ inline std::error_code SectionRef::getContents(StringRef &Result) const {
 
 inline uint64_t SectionRef::getAlignment() const {
   return OwningObject->getSectionAlignment(SectionPimpl);
+}
+
+inline bool SectionRef::isCompressed() const {
+  return OwningObject->isSectionCompressed(SectionPimpl);
 }
 
 inline bool SectionRef::isText() const {

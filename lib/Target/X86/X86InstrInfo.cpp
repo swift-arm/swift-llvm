@@ -1029,7 +1029,7 @@ X86InstrInfo::X86InstrInfo(X86Subtarget &STI)
     { X86::PADDUSBrr,       X86::PADDUSBrm,     TB_ALIGN_16 },
     { X86::PADDUSWrr,       X86::PADDUSWrm,     TB_ALIGN_16 },
     { X86::PADDWrr,         X86::PADDWrm,       TB_ALIGN_16 },
-    { X86::PALIGNR128rr,    X86::PALIGNR128rm,  TB_ALIGN_16 },
+    { X86::PALIGNRrri,      X86::PALIGNRrmi,    TB_ALIGN_16 },
     { X86::PANDNrr,         X86::PANDNrm,       TB_ALIGN_16 },
     { X86::PANDrr,          X86::PANDrm,        TB_ALIGN_16 },
     { X86::PAVGBrr,         X86::PAVGBrm,       TB_ALIGN_16 },
@@ -1326,7 +1326,7 @@ X86InstrInfo::X86InstrInfo(X86Subtarget &STI)
     { X86::VPADDUSBrr,        X86::VPADDUSBrm,         0 },
     { X86::VPADDUSWrr,        X86::VPADDUSWrm,         0 },
     { X86::VPADDWrr,          X86::VPADDWrm,           0 },
-    { X86::VPALIGNR128rr,     X86::VPALIGNR128rm,      0 },
+    { X86::VPALIGNRrri,       X86::VPALIGNRrmi,        0 },
     { X86::VPANDNrr,          X86::VPANDNrm,           0 },
     { X86::VPANDrr,           X86::VPANDrm,            0 },
     { X86::VPAVGBrr,          X86::VPAVGBrm,           0 },
@@ -1482,7 +1482,7 @@ X86InstrInfo::X86InstrInfo(X86Subtarget &STI)
     { X86::VPADDUSBYrr,       X86::VPADDUSBYrm,        0 },
     { X86::VPADDUSWYrr,       X86::VPADDUSWYrm,        0 },
     { X86::VPADDWYrr,         X86::VPADDWYrm,          0 },
-    { X86::VPALIGNR256rr,     X86::VPALIGNR256rm,      0 },
+    { X86::VPALIGNRYrri,      X86::VPALIGNRYrmi,       0 },
     { X86::VPANDNYrr,         X86::VPANDNYrm,          0 },
     { X86::VPANDYrr,          X86::VPANDYrm,           0 },
     { X86::VPAVGBYrr,         X86::VPAVGBYrm,          0 },
@@ -1547,6 +1547,8 @@ X86InstrInfo::X86InstrInfo(X86Subtarget &STI)
     { X86::VPSRAWYrr,         X86::VPSRAWYrm,          0 },
     { X86::VPSRAVDrr,         X86::VPSRAVDrm,          0 },
     { X86::VPSRAVDYrr,        X86::VPSRAVDYrm,         0 },
+    { X86::VPSRAVD_Intrr,     X86::VPSRAVD_Intrm,      0 },
+    { X86::VPSRAVD_IntYrr,    X86::VPSRAVD_IntYrm,     0 },
     { X86::VPSRLDYrr,         X86::VPSRLDYrm,          0 },
     { X86::VPSRLQYrr,         X86::VPSRLQYrm,          0 },
     { X86::VPSRLWYrr,         X86::VPSRLWYrm,          0 },
@@ -2504,7 +2506,7 @@ void X86InstrInfo::reMaterialize(MachineBasicBlock &MBB,
       llvm_unreachable("Unexpected instruction!");
     }
 
-    DebugLoc DL = Orig->getDebugLoc();
+    const DebugLoc &DL = Orig->getDebugLoc();
     BuildMI(MBB, I, DL, get(X86::MOV32ri)).addOperand(Orig->getOperand(0))
       .addImm(Value);
   } else {
@@ -3927,17 +3929,21 @@ bool X86InstrInfo::isUnpredicatedTerminator(const MachineInstr &MI) const {
   return !isPredicated(MI);
 }
 
-// Given a MBB and its TBB, find the FBB which was a fallthrough MBB (it may not
-// be a fallthorough MBB now due to layout changes). Return nullptr if the
-// fallthough MBB cannot be identified.
+// Given a MBB and its TBB, find the FBB which was a fallthrough MBB (it may
+// not be a fallthrough MBB now due to layout changes). Return nullptr if the
+// fallthrough MBB cannot be identified.
 static MachineBasicBlock *getFallThroughMBB(MachineBasicBlock *MBB,
                                             MachineBasicBlock *TBB) {
+  // Look for non-EHPad successors other than TBB. If we find exactly one, it
+  // is the fallthrough MBB. If we find zero, then TBB is both the target MBB
+  // and fallthrough MBB. If we find more than one, we cannot identify the
+  // fallthrough MBB and should return nullptr.
   MachineBasicBlock *FallthroughBB = nullptr;
   for (auto SI = MBB->succ_begin(), SE = MBB->succ_end(); SI != SE; ++SI) {
-    if ((*SI)->isEHPad() || *SI == TBB)
+    if ((*SI)->isEHPad() || (*SI == TBB && FallthroughBB))
       continue;
     // Return a nullptr if we found more than one fallthrough successor.
-    if (FallthroughBB)
+    if (FallthroughBB && FallthroughBB != TBB)
       return nullptr;
     FallthroughBB = *SI;
   }
@@ -4203,10 +4209,11 @@ unsigned X86InstrInfo::RemoveBranch(MachineBasicBlock &MBB) const {
   return Count;
 }
 
-unsigned
-X86InstrInfo::InsertBranch(MachineBasicBlock &MBB, MachineBasicBlock *TBB,
-                           MachineBasicBlock *FBB, ArrayRef<MachineOperand> Cond,
-                           DebugLoc DL) const {
+unsigned X86InstrInfo::InsertBranch(MachineBasicBlock &MBB,
+                                    MachineBasicBlock *TBB,
+                                    MachineBasicBlock *FBB,
+                                    ArrayRef<MachineOperand> Cond,
+                                    const DebugLoc &DL) const {
   // Shouldn't be a fall through.
   assert(TBB && "InsertBranch must not be told to insert a fallthrough");
   assert((Cond.size() == 1 || Cond.size() == 0) &&
@@ -4298,15 +4305,16 @@ canInsertSelect(const MachineBasicBlock &MBB,
 }
 
 void X86InstrInfo::insertSelect(MachineBasicBlock &MBB,
-                                MachineBasicBlock::iterator I, DebugLoc DL,
-                                unsigned DstReg, ArrayRef<MachineOperand> Cond,
-                                unsigned TrueReg, unsigned FalseReg) const {
-   MachineRegisterInfo &MRI = MBB.getParent()->getRegInfo();
-   assert(Cond.size() == 1 && "Invalid Cond array");
-   unsigned Opc = getCMovFromCond((X86::CondCode)Cond[0].getImm(),
-                                  MRI.getRegClass(DstReg)->getSize(),
-                                  false/*HasMemoryOperand*/);
-   BuildMI(MBB, I, DL, get(Opc), DstReg).addReg(FalseReg).addReg(TrueReg);
+                                MachineBasicBlock::iterator I,
+                                const DebugLoc &DL, unsigned DstReg,
+                                ArrayRef<MachineOperand> Cond, unsigned TrueReg,
+                                unsigned FalseReg) const {
+  MachineRegisterInfo &MRI = MBB.getParent()->getRegInfo();
+  assert(Cond.size() == 1 && "Invalid Cond array");
+  unsigned Opc = getCMovFromCond((X86::CondCode)Cond[0].getImm(),
+                                 MRI.getRegClass(DstReg)->getSize(),
+                                 false /*HasMemoryOperand*/);
+  BuildMI(MBB, I, DL, get(Opc), DstReg).addReg(FalseReg).addReg(TrueReg);
 }
 
 /// Test if the given register is a physical h register.
@@ -4431,9 +4439,9 @@ unsigned copyPhysRegOpcode_AVX512(unsigned& DestReg, unsigned& SrcReg,
 }
 
 void X86InstrInfo::copyPhysReg(MachineBasicBlock &MBB,
-                               MachineBasicBlock::iterator MI, DebugLoc DL,
-                               unsigned DestReg, unsigned SrcReg,
-                               bool KillSrc) const {
+                               MachineBasicBlock::iterator MI,
+                               const DebugLoc &DL, unsigned DestReg,
+                               unsigned SrcReg, bool KillSrc) const {
   // First deal with the normal symmetric copies.
   bool HasAVX = Subtarget.hasAVX();
   bool HasAVX512 = Subtarget.hasAVX512();
@@ -4527,8 +4535,9 @@ void X86InstrInfo::copyPhysReg(MachineBasicBlock &MBB,
     // first frame index.
     // See X86ISelLowering.cpp - X86::hasCopyImplyingStackAdjustment.
 
+    const TargetRegisterInfo *TRI = &getRegisterInfo();
     MachineBasicBlock::LivenessQueryResult LQR =
-        MBB.computeRegisterLiveness(&getRegisterInfo(), AX, MI);
+        MBB.computeRegisterLiveness(TRI, AX, MI);
     // We do not want to save and restore AX if we do not have to.
     // Moreover, if we do so whereas AX is dead, we would need to set
     // an undef flag on the use of AX, otherwise the verifier will
@@ -4536,15 +4545,19 @@ void X86InstrInfo::copyPhysReg(MachineBasicBlock &MBB,
     // We do not want to change the behavior of the machine verifier
     // as this is usually wrong to read an undef value.
     if (MachineBasicBlock::LQR_Unknown == LQR) {
-      LivePhysRegs LPR(&getRegisterInfo());
+      LivePhysRegs LPR(TRI);
       LPR.addLiveOuts(MBB);
       MachineBasicBlock::iterator I = MBB.end();
       while (I != MI) {
         --I;
         LPR.stepBackward(*I);
       }
-      LQR = LPR.contains(AX) ? MachineBasicBlock::LQR_Live
-                             : MachineBasicBlock::LQR_Dead;
+      // AX contains the top most register in the aliasing hierarchy.
+      // It may not be live, but one of its aliases may be.
+      for (MCRegAliasIterator AI(AX, TRI, true);
+           AI.isValid() && LQR != MachineBasicBlock::LQR_Live; ++AI)
+        LQR = LPR.contains(*AI) ? MachineBasicBlock::LQR_Live
+                                : MachineBasicBlock::LQR_Dead;
     }
     bool AXDead = (Reg == AX) || (MachineBasicBlock::LQR_Dead == LQR);
     if (!AXDead)
@@ -4645,25 +4658,38 @@ static unsigned getLoadStoreRegOpcode(unsigned Reg,
     assert((X86::VR128RegClass.hasSubClassEq(RC) ||
             X86::VR128XRegClass.hasSubClassEq(RC))&& "Unknown 16-byte regclass");
     // If stack is realigned we can use aligned stores.
+    if (X86::VR128RegClass.hasSubClassEq(RC)) {
+      if (isStackAligned)
+        return load ? (HasAVX ? X86::VMOVAPSrm : X86::MOVAPSrm)
+                    : (HasAVX ? X86::VMOVAPSmr : X86::MOVAPSmr);
+      else
+        return load ? (HasAVX ? X86::VMOVUPSrm : X86::MOVUPSrm)
+                    : (HasAVX ? X86::VMOVUPSmr : X86::MOVUPSmr);
+    }
+    assert(STI.hasVLX() && "Using extended register requires VLX");
     if (isStackAligned)
-      return load ?
-        (HasAVX ? X86::VMOVAPSrm : X86::MOVAPSrm) :
-        (HasAVX ? X86::VMOVAPSmr : X86::MOVAPSmr);
+      return load ? X86::VMOVAPSZ128rm : X86::VMOVAPSZ128mr;
     else
-      return load ?
-        (HasAVX ? X86::VMOVUPSrm : X86::MOVUPSrm) :
-        (HasAVX ? X86::VMOVUPSmr : X86::MOVUPSmr);
+      return load ? X86::VMOVUPSZ128rm : X86::VMOVUPSZ128mr;
   }
   case 32:
     assert((X86::VR256RegClass.hasSubClassEq(RC) ||
             X86::VR256XRegClass.hasSubClassEq(RC)) && "Unknown 32-byte regclass");
     // If stack is realigned we can use aligned stores.
+    if (X86::VR256RegClass.hasSubClassEq(RC)) {
+      if (isStackAligned)
+        return load ? X86::VMOVAPSYrm : X86::VMOVAPSYmr;
+      else
+        return load ? X86::VMOVUPSYrm : X86::VMOVUPSYmr;
+    }
+    assert(STI.hasVLX() && "Using extended register requires VLX");
     if (isStackAligned)
-      return load ? X86::VMOVAPSYrm : X86::VMOVAPSYmr;
+      return load ? X86::VMOVAPSZ256rm : X86::VMOVAPSZ256mr;
     else
-      return load ? X86::VMOVUPSYrm : X86::VMOVUPSYmr;
+      return load ? X86::VMOVUPSZ256rm : X86::VMOVUPSZ256mr;
   case 64:
     assert(X86::VR512RegClass.hasSubClassEq(RC) && "Unknown 64-byte regclass");
+    assert(STI.hasVLX() && "Using 512-bit register requires AVX512");
     if (isStackAligned)
       return load ? X86::VMOVAPSZrm : X86::VMOVAPSZmr;
     else
@@ -5512,6 +5538,10 @@ bool X86InstrInfo::expandPostRAPseudo(MachineBasicBlock::iterator MI) const {
   case X86::AVX_SET0:
     assert(HasAVX && "AVX not supported");
     return Expand2AddrUndef(MIB, get(X86::VXORPSYrr));
+  case X86::AVX512_128_SET0:
+    return Expand2AddrUndef(MIB, get(X86::VPXORDZ128rr));
+  case X86::AVX512_256_SET0:
+    return Expand2AddrUndef(MIB, get(X86::VPXORDZ256rr));
   case X86::AVX512_512_SET0:
     return Expand2AddrUndef(MIB, get(X86::VPXORDZrr));
   case X86::V_SETALLONES:
@@ -6064,7 +6094,8 @@ breakPartialRegDependency(MachineBasicBlock::iterator MI, unsigned OpNum,
 
 MachineInstr *X86InstrInfo::foldMemoryOperandImpl(
     MachineFunction &MF, MachineInstr *MI, ArrayRef<unsigned> Ops,
-    MachineBasicBlock::iterator InsertPt, int FrameIndex) const {
+    MachineBasicBlock::iterator InsertPt, int FrameIndex,
+    LiveIntervals *LIS) const {
   // Check switch flag
   if (NoFusing)
     return nullptr;
@@ -6176,14 +6207,15 @@ static bool isNonFoldablePartialRegisterLoad(const MachineInstr &LoadMI,
 
 MachineInstr *X86InstrInfo::foldMemoryOperandImpl(
     MachineFunction &MF, MachineInstr *MI, ArrayRef<unsigned> Ops,
-    MachineBasicBlock::iterator InsertPt, MachineInstr *LoadMI) const {
+    MachineBasicBlock::iterator InsertPt, MachineInstr *LoadMI,
+    LiveIntervals *LIS) const {
   // If loading from a FrameIndex, fold directly from the FrameIndex.
   unsigned NumOps = LoadMI->getDesc().getNumOperands();
   int FrameIndex;
   if (isLoadFromStackSlot(LoadMI, FrameIndex)) {
     if (isNonFoldablePartialRegisterLoad(*LoadMI, *MI, MF))
       return nullptr;
-    return foldMemoryOperandImpl(MF, MI, Ops, InsertPt, FrameIndex);
+    return foldMemoryOperandImpl(MF, MI, Ops, InsertPt, FrameIndex, LIS);
   }
 
   // Check switch flag
@@ -7305,7 +7337,6 @@ X86InstrInfo::getSerializableDirectMachineOperandTargetFlags() const {
       {MO_DARWIN_STUB, "x86-darwin-stub"},
       {MO_DARWIN_NONLAZY, "x86-darwin-nonlazy"},
       {MO_DARWIN_NONLAZY_PIC_BASE, "x86-darwin-nonlazy-pic-base"},
-      {MO_DARWIN_HIDDEN_NONLAZY_PIC_BASE, "x86-darwin-hidden-nonlazy-pic-base"},
       {MO_TLVP, "x86-tlvp"},
       {MO_TLVP_PIC_BASE, "x86-tlvp-pic-base"},
       {MO_SECREL, "x86-secrel"}};

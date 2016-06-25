@@ -106,7 +106,7 @@ template <> struct DenseMapInfo<GVN::Expression> {
 
   static inline GVN::Expression getTombstoneKey() { return ~1U; }
 
-  static unsigned getHashValue(const GVN::Expression e) {
+  static unsigned getHashValue(const GVN::Expression &e) {
     using llvm::hash_value;
     return static_cast<unsigned>(hash_value(e));
   }
@@ -594,10 +594,15 @@ PreservedAnalyses GVN::run(Function &F, AnalysisManager<Function> &AM) {
   auto &AA = AM.getResult<AAManager>(F);
   auto &MemDep = AM.getResult<MemoryDependenceAnalysis>(F);
   bool Changed = runImpl(F, AC, DT, TLI, AA, &MemDep);
-  return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
+  if (!Changed)
+    return PreservedAnalyses::all();
+  PreservedAnalyses PA;
+  PA.preserve<DominatorTreeAnalysis>();
+  PA.preserve<GlobalsAA>();
+  return PA;
 }
 
-#if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
+LLVM_DUMP_METHOD
 void GVN::dump(DenseMap<uint32_t, Value*>& d) {
   errs() << "{\n";
   for (DenseMap<uint32_t, Value*>::iterator I = d.begin(),
@@ -607,7 +612,6 @@ void GVN::dump(DenseMap<uint32_t, Value*>& d) {
   }
   errs() << "}\n";
 }
-#endif
 
 /// Return true if we can prove that the value
 /// we're analyzing is fully available in the specified block.  As we go, keep
@@ -1219,6 +1223,7 @@ bool GVN::AnalyzeLoadAvailability(LoadInst *LI, MemDepResult DepInfo,
 
   assert((DepInfo.isDef() || DepInfo.isClobber()) &&
          "expected a local dependence");
+  assert(LI->isUnordered() && "rules below are incorrect for ordered access");
 
   const DataLayout &DL = LI->getModule()->getDataLayout();
 
@@ -1227,7 +1232,8 @@ bool GVN::AnalyzeLoadAvailability(LoadInst *LI, MemDepResult DepInfo,
     // read by the load, we can extract the bits we need for the load from the
     // stored value.
     if (StoreInst *DepSI = dyn_cast<StoreInst>(DepInfo.getInst())) {
-      if (Address) {
+      // Can't forward from non-atomic to atomic without violating memory model.
+      if (Address && LI->isAtomic() <= DepSI->isAtomic()) {
         int Offset =
           AnalyzeLoadFromClobberingStore(LI->getType(), Address, DepSI);
         if (Offset != -1) {
@@ -1244,7 +1250,8 @@ bool GVN::AnalyzeLoadAvailability(LoadInst *LI, MemDepResult DepInfo,
     if (LoadInst *DepLI = dyn_cast<LoadInst>(DepInfo.getInst())) {
       // If this is a clobber and L is the first instruction in its block, then
       // we have the first instruction in the entry block.
-      if (DepLI != LI && Address) {
+      // Can't forward from non-atomic to atomic without violating memory model.
+      if (DepLI != LI && Address && LI->isAtomic() <= DepLI->isAtomic()) {
         int Offset =
           AnalyzeLoadFromClobberingLoad(LI->getType(), Address, DepLI, DL);
 
@@ -1258,7 +1265,7 @@ bool GVN::AnalyzeLoadAvailability(LoadInst *LI, MemDepResult DepInfo,
     // If the clobbering value is a memset/memcpy/memmove, see if we can
     // forward a value on from it.
     if (MemIntrinsic *DepMI = dyn_cast<MemIntrinsic>(DepInfo.getInst())) {
-      if (Address) {
+      if (Address && !LI->isAtomic()) {
         int Offset = AnalyzeLoadFromClobberingMemInst(LI->getType(), Address,
                                                       DepMI, DL);
         if (Offset != -1) {
@@ -1304,6 +1311,10 @@ bool GVN::AnalyzeLoadAvailability(LoadInst *LI, MemDepResult DepInfo,
                                          LI->getType(), DL))
       return false;
 
+    // Can't forward from non-atomic to atomic without violating memory model.
+    if (S->isAtomic() < LI->isAtomic())
+      return false;
+
     Res = AvailableValue::get(S->getValueOperand());
     return true;
   }
@@ -1314,6 +1325,10 @@ bool GVN::AnalyzeLoadAvailability(LoadInst *LI, MemDepResult DepInfo,
     // it.
     if (LD->getType() != LI->getType() &&
         !CanCoerceMustAliasedValueToLoad(LD, LI->getType(), DL))
+      return false;
+
+    // Can't forward from non-atomic to atomic without violating memory model.
+    if (LD->isAtomic() < LI->isAtomic())
       return false;
 
     Res = AvailableValue::getLoad(LD);
@@ -1541,9 +1556,10 @@ bool GVN::PerformLoadPRE(LoadInst *LI, AvailValInBlkVect &ValuesPerBlock,
     BasicBlock *UnavailablePred = PredLoad.first;
     Value *LoadPtr = PredLoad.second;
 
-    Instruction *NewLoad = new LoadInst(LoadPtr, LI->getName()+".pre", false,
-                                        LI->getAlignment(),
-                                        UnavailablePred->getTerminator());
+    auto *NewLoad = new LoadInst(LoadPtr, LI->getName()+".pre",
+                                 LI->isVolatile(), LI->getAlignment(),
+                                 LI->getOrdering(), LI->getSynchScope(),
+                                 UnavailablePred->getTerminator());
 
     // Transfer the old load's AA tags to the new load.
     AAMDNodes Tags;
@@ -1555,6 +1571,8 @@ bool GVN::PerformLoadPRE(LoadInst *LI, AvailValInBlkVect &ValuesPerBlock,
       NewLoad->setMetadata(LLVMContext::MD_invariant_load, MD);
     if (auto *InvGroupMD = LI->getMetadata(LLVMContext::MD_invariant_group))
       NewLoad->setMetadata(LLVMContext::MD_invariant_group, InvGroupMD);
+    if (auto *RangeMD = LI->getMetadata(LLVMContext::MD_range))
+      NewLoad->setMetadata(LLVMContext::MD_range, RangeMD);
 
     // Transfer DebugLoc.
     NewLoad->setDebugLoc(LI->getDebugLoc());
@@ -1755,7 +1773,8 @@ bool GVN::processLoad(LoadInst *L) {
   if (!MD)
     return false;
 
-  if (!L->isSimple())
+  // This code hasn't been audited for ordered or volatile memory access
+  if (!L->isUnordered())
     return false;
 
   if (L->use_empty()) {

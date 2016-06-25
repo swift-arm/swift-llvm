@@ -16,6 +16,7 @@
 #define LLVM_ANALYSIS_BLOCKFREQUENCYINFOIMPL_H
 
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/Optional.h"
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/iterator_range.h"
 #include "llvm/IR/BasicBlock.h"
@@ -476,6 +477,8 @@ public:
   Scaled64 getFloatingBlockFreq(const BlockNode &Node) const;
 
   BlockFrequency getBlockFreq(const BlockNode &Node) const;
+  Optional<uint64_t> getBlockProfileCount(const Function &F,
+                                          const BlockNode &Node) const;
 
   void setBlockFreq(const BlockNode &Node, uint64_t Freq);
 
@@ -915,6 +918,10 @@ public:
   BlockFrequency getBlockFreq(const BlockT *BB) const {
     return BlockFrequencyInfoImplBase::getBlockFreq(getNode(BB));
   }
+  Optional<uint64_t> getBlockProfileCount(const Function &F,
+                                          const BlockT *BB) const {
+    return BlockFrequencyInfoImplBase::getBlockProfileCount(F, getNode(BB));
+  }
   void setBlockFreq(const BlockT *BB, uint64_t Freq);
   Scaled64 getFloatingBlockFreq(const BlockT *BB) const {
     return BlockFrequencyInfoImplBase::getFloatingBlockFreq(getNode(BB));
@@ -1173,12 +1180,10 @@ void BlockFrequencyInfoImpl<BT>::computeIrreducibleMass(
   updateLoopWithIrreducible(*OuterLoop);
 }
 
-namespace {
 // A helper function that converts a branch probability into weight.
 inline uint32_t getWeightFromBranchProb(const BranchProbability Prob) {
   return Prob.getNumerator();
 }
-} // namespace
 
 template <class BT>
 bool

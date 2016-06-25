@@ -84,7 +84,9 @@ void X86_MC::initLLVMToSEHAndCVRegMapping(MCRegisterInfo *MRI) {
   for (unsigned I = 0; I < array_lengthof(LowCVRegs); ++I)
     MRI->mapLLVMRegToCVReg(LowCVRegs[I], I + CVLowRegStart);
 
-  // The x86 registers start at 128 and are numbered sequentially.
+  MRI->mapLLVMRegToCVReg(X86::EFLAGS, 34);
+
+  // The x87 registers start at 128 and are numbered sequentially.
   unsigned FP0Start = 128;
   for (unsigned I = 0; I < 8; ++I)
     MRI->mapLLVMRegToCVReg(X86::FP0 + I, FP0Start + I);
@@ -203,37 +205,6 @@ static MCCodeGenInfo *createX86MCCodeGenInfo(const Triple &TT, Reloc::Model RM,
   MCCodeGenInfo *X = new MCCodeGenInfo();
 
   bool is64Bit = TT.getArch() == Triple::x86_64;
-
-  if (RM == Reloc::Default) {
-    // Darwin defaults to PIC in 64 bit mode and dynamic-no-pic in 32 bit mode.
-    // Win64 requires rip-rel addressing, thus we force it to PIC. Otherwise we
-    // use static relocation model by default.
-    if (TT.isOSDarwin()) {
-      if (is64Bit)
-        RM = Reloc::PIC_;
-      else
-        RM = Reloc::DynamicNoPIC;
-    } else if (TT.isOSWindows() && is64Bit)
-      RM = Reloc::PIC_;
-    else
-      RM = Reloc::Static;
-  }
-
-  // ELF and X86-64 don't have a distinct DynamicNoPIC model.  DynamicNoPIC
-  // is defined as a model for code which may be used in static or dynamic
-  // executables but not necessarily a shared library. On X86-32 we just
-  // compile in -static mode, in x86-64 we use PIC.
-  if (RM == Reloc::DynamicNoPIC) {
-    if (is64Bit)
-      RM = Reloc::PIC_;
-    else if (!TT.isOSDarwin())
-      RM = Reloc::Static;
-  }
-
-  // If we are on Darwin, disallow static relocation model in X86-64 mode, since
-  // the Mach-O file format doesn't support it.
-  if (RM == Reloc::Static && TT.isOSDarwin() && is64Bit)
-    RM = Reloc::PIC_;
 
   // For static codegen, if we're not already set, use Small codegen.
   if (CM == CodeModel::Default)

@@ -34,7 +34,6 @@
 #include "llvm/MC/MCSymbolELF.h"
 #include "llvm/MC/MCValue.h"
 #include "llvm/ProfileData/InstrProf.h"
-#include "llvm/ProfileData/ProfileCommon.h"
 #include "llvm/Support/COFF.h"
 #include "llvm/Support/Dwarf.h"
 #include "llvm/Support/ELF.h"
@@ -245,11 +244,6 @@ static StringRef getSectionPrefixForGlobal(SectionKind Kind) {
   return ".data.rel.ro";
 }
 
-static cl::opt<bool> GroupFunctionsByHotness(
-    "group-functions-by-hotness",
-    llvm::cl::desc("Partition hot/cold functions by sections prefix"),
-    cl::init(false));
-
 static MCSectionELF *
 selectELFSectionForGlobal(MCContext &Ctx, const GlobalValue *GV,
                           SectionKind Kind, Mangler &Mang,
@@ -301,16 +295,8 @@ selectELFSectionForGlobal(MCContext &Ctx, const GlobalValue *GV,
   } else {
     Name = getSectionPrefixForGlobal(Kind);
   }
-
-  if (GroupFunctionsByHotness) {
-    if (const Function *F = dyn_cast<Function>(GV)) {
-      if (ProfileSummary::isFunctionHot(F)) {
-        Name += getHotSectionPrefix();
-      } else if (ProfileSummary::isFunctionUnlikely(F)) {
-        Name += getUnlikelySectionPrefix();
-      }
-    }
-  }
+  // FIXME: Extend the section prefix to include hotness catagories such as .hot
+  //  or .unlikely for functions.
 
   if (EmitUniqueSection && UniqueSectionNames) {
     Name.push_back('.');
@@ -443,7 +429,7 @@ const MCExpr *TargetLoweringObjectFileELF::lowerRelativeReference(
     const TargetMachine &TM) const {
   // We may only use a PLT-relative relocation to refer to unnamed_addr
   // functions.
-  if (!LHS->hasUnnamedAddr() || !LHS->getValueType()->isFunctionTy())
+  if (!LHS->hasGlobalUnnamedAddr() || !LHS->getValueType()->isFunctionTy())
     return nullptr;
 
   // Basic sanity checks.
@@ -700,9 +686,7 @@ const MCExpr *TargetLoweringObjectFileMachO::getTTypeGlobalReference(
 
     // Add information about the stub reference to MachOMMI so that the stub
     // gets emitted by the asmprinter.
-    MachineModuleInfoImpl::StubValueTy &StubSym =
-      GV->hasHiddenVisibility() ? MachOMMI.getHiddenGVStubEntry(SSym) :
-                                  MachOMMI.getGVStubEntry(SSym);
+    MachineModuleInfoImpl::StubValueTy &StubSym = MachOMMI.getGVStubEntry(SSym);
     if (!StubSym.getPointer()) {
       MCSymbol *Sym = TM.getSymbol(GV, Mang);
       StubSym = MachineModuleInfoImpl::StubValueTy(Sym, !GV->hasLocalLinkage());

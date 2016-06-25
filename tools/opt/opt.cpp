@@ -312,10 +312,9 @@ static TargetMachine* GetTargetMachine(Triple TheTriple, StringRef CPUStr,
     return nullptr;
   }
 
-  return TheTarget->createTargetMachine(TheTriple.getTriple(),
-                                        CPUStr, FeaturesStr, Options,
-                                        RelocModel, CMModel,
-                                        GetCodeGenOptLevel());
+  return TheTarget->createTargetMachine(TheTriple.getTriple(), CPUStr,
+                                        FeaturesStr, Options, getRelocModel(),
+                                        CMModel, GetCodeGenOptLevel());
 }
 
 #ifdef LINK_POLLY_INTO_TOOLS
@@ -328,7 +327,7 @@ void initializePollyPasses(llvm::PassRegistry &Registry);
 // main for opt
 //
 int main(int argc, char **argv) {
-  sys::PrintStackTraceOnErrorSignal();
+  sys::PrintStackTraceOnErrorSignal(argv[0]);
   llvm::PrettyStackTraceProgram X(argc, argv);
 
   // Enable debug stream buffering.
@@ -363,6 +362,8 @@ int main(int argc, char **argv) {
   initializeSafeStackPass(Registry);
   initializeSjLjEHPreparePass(Registry);
   initializePreISelIntrinsicLoweringPass(Registry);
+  initializeGlobalMergePass(Registry);
+  initializeInterleavedAccessPass(Registry);
 
 #ifdef LINK_POLLY_INTO_TOOLS
   polly::initializePollyPasses(Registry);
@@ -614,7 +615,7 @@ int main(int argc, char **argv) {
   if (OptLevelO3)
     AddOptimizationPasses(Passes, *FPasses, TM.get(), 3, 0);
 
-  if (OptLevelO1 || OptLevelO2 || OptLevelOs || OptLevelOz || OptLevelO3) {
+  if (FPasses) {
     FPasses->doInitialization();
     for (Function &F : *M)
       FPasses->run(F);

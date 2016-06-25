@@ -1,6 +1,6 @@
 # See docs/CMake.html for instructions about how to build LLVM with CMake.
 
-cmake_minimum_required(VERSION 2.8.12.2)
+cmake_minimum_required(VERSION 3.4.3)
 
 if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   message(STATUS "No build type selected, default to Debug")
@@ -18,12 +18,6 @@ if (POLICY CMP0051)
   # defer to the OLD behavior of not including generator expressions
   # in the output for now.
   cmake_policy(SET CMP0051 OLD)
-endif()
-
-if(CMAKE_VERSION VERSION_LESS 3.1.20141117)
-  set(cmake_3_2_USES_TERMINAL)
-else()
-  set(cmake_3_2_USES_TERMINAL USES_TERMINAL)
 endif()
 
 if(NOT DEFINED LLVM_VERSION_MAJOR)
@@ -75,8 +69,8 @@ endif()
 set(LLVM_PARALLEL_COMPILE_JOBS "" CACHE STRING
   "Define the maximum number of concurrent compilation jobs.")
 if(LLVM_PARALLEL_COMPILE_JOBS)
-  if(CMAKE_VERSION VERSION_LESS 3.0 OR NOT CMAKE_MAKE_PROGRAM MATCHES "ninja")
-    message(WARNING "Job pooling is only available with Ninja generators and CMake 3.0 and later.")
+  if(NOT CMAKE_MAKE_PROGRAM MATCHES "ninja")
+    message(WARNING "Job pooling is only available with Ninja generators.")
   else()
     set_property(GLOBAL APPEND PROPERTY JOB_POOLS compile_job_pool=${LLVM_PARALLEL_COMPILE_JOBS})
     set(CMAKE_JOB_POOL_COMPILE compile_job_pool)
@@ -91,8 +85,8 @@ endif()
 set(LLVM_PARALLEL_LINK_JOBS "" CACHE STRING
   "Define the maximum number of concurrent link jobs.")
 if(LLVM_PARALLEL_LINK_JOBS)
-  if(CMAKE_VERSION VERSION_LESS 3.0 OR NOT CMAKE_MAKE_PROGRAM MATCHES "ninja")
-    message(WARNING "Job pooling is only available with Ninja generators and CMake 3.0 and later.")
+  if(NOT CMAKE_MAKE_PROGRAM MATCHES "ninja")
+    message(WARNING "Job pooling is only available with Ninja generators.")
   else()
     set_property(GLOBAL APPEND PROPERTY JOB_POOLS link_job_pool=${LLVM_PARALLEL_LINK_JOBS})
     set(CMAKE_JOB_POOL_LINK link_job_pool)
@@ -201,6 +195,9 @@ endif()
 
 set(LLVM_LIBDIR_SUFFIX "" CACHE STRING "Define suffix of library directory name (32/64)" )
 
+set(LLVM_TOOLS_INSTALL_DIR "bin" CACHE STRING "Path for binary subdirectory (defaults to 'bin')")
+mark_as_advanced(LLVM_TOOLS_INSTALL_DIR)
+
 # They are used as destination of target generators.
 set(LLVM_RUNTIME_OUTPUT_INTDIR ${CMAKE_CURRENT_BINARY_DIR}/${CMAKE_CFG_INTDIR}/bin)
 set(LLVM_LIBRARY_OUTPUT_INTDIR ${CMAKE_CURRENT_BINARY_DIR}/${CMAKE_CFG_INTDIR}/lib${LLVM_LIBDIR_SUFFIX})
@@ -226,7 +223,6 @@ set(LLVM_ALL_TARGETS
   AMDGPU
   ARM
   BPF
-  CppBackend
   Hexagon
   Mips
   MSP430
@@ -249,11 +245,6 @@ set(LLVM_EXPERIMENTAL_TARGETS_TO_BUILD ""
 
 option(BUILD_SHARED_LIBS
   "Build all libraries as shared libraries instead of static" OFF)
-
-option(LLVM_ENABLE_TIMESTAMPS "Enable embedding timestamp information in build" ON)
-if(LLVM_ENABLE_TIMESTAMPS)
-  set(ENABLE_TIMESTAMPS 1)
-endif()
 
 option(LLVM_ENABLE_BACKTRACES "Enable embedding backtraces on crash." ON)
 if(LLVM_ENABLE_BACKTRACES)
@@ -343,8 +334,26 @@ set(LLVM_USE_SANITIZER "" CACHE STRING
 option(LLVM_USE_SPLIT_DWARF
   "Use -gsplit-dwarf when compiling llvm." OFF)
 
-option(WITH_POLLY "Build LLVM with Polly" ON)
-option(LINK_POLLY_INTO_TOOLS "Static link Polly into tools" ON)
+option(LLVM_POLLY_LINK_INTO_TOOLS "Statically link Polly into tools (if available)" ON)
+option(LLVM_POLLY_BUILD "Build LLVM with Polly" ON)
+
+if (EXISTS ${LLVM_MAIN_SRC_DIR}/tools/polly/CMakeLists.txt)
+  set(POLLY_IN_TREE TRUE)
+else()
+  set(POLLY_IN_TREE FALSE)
+endif()
+
+if (LLVM_POLLY_BUILD AND POLLY_IN_TREE)
+  set(WITH_POLLY ON)
+else()
+  set(WITH_POLLY OFF)
+endif()
+
+if (LLVM_POLLY_LINK_INTO_TOOLS AND WITH_POLLY)
+  set(LINK_POLLY_INTO_TOOLS ON)
+else()
+  set(LINK_POLLY_INTO_TOOLS OFF)
+endif()
 
 # Define an option controlling whether we should build for 32-bit on 64-bit
 # platforms, where supported.
@@ -395,16 +404,6 @@ option (LLVM_ENABLE_SPHINX "Use Sphinx to generate llvm documentation." OFF)
 option (LLVM_BUILD_EXTERNAL_COMPILER_RT
   "Build compiler-rt as an external project." OFF)
 
-if(WITH_POLLY)
-  if(NOT EXISTS ${LLVM_MAIN_SRC_DIR}/tools/polly/CMakeLists.txt)
-    set(WITH_POLLY OFF)
-  endif()
-endif(WITH_POLLY)
-
-if (NOT WITH_POLLY)
- set(LINK_POLLY_INTO_TOOLS OFF)
-endif (NOT WITH_POLLY)
-
 # You can configure which libraries from LLVM you want to include in the
 # shared library by setting LLVM_DYLIB_COMPONENTS to a semi-colon delimited
 # list of LLVM components. All component names handled by llvm-config are valid.
@@ -429,6 +428,21 @@ if (MSVC_IDE AND NOT (MSVC_VERSION LESS 1900))
   option(LLVM_ADD_NATIVE_VISUALIZERS_TO_SOLUTION "Configure project to use Visual Studio native visualizers" TRUE)
 else()
   set(LLVM_ADD_NATIVE_VISUALIZERS_TO_SOLUTION FALSE CACHE INTERNAL "For Visual Studio 2013, manually copy natvis files to Documents\\Visual Studio 2013\\Visualizers" FORCE)
+endif()
+
+if (LLVM_BUILD_INSTRUMENTED OR LLVM_BUILD_INSTRUMENTED_COVERAGE)
+  if(NOT LLVM_PROFILE_MERGE_POOL_SIZE)
+    # A pool size of 1-2 is probably sufficient on a SSD. 3-4 should be fine
+    # for spining disks. Anything higher may only help on slower mediums.
+    set(LLVM_PROFILE_MERGE_POOL_SIZE "4")
+  endif()
+  if(NOT LLVM_PROFILE_FILE_PATTERN)
+    if(NOT LLVM_PROFILE_DATA_DIR)
+      set(LLVM_PROFILE_FILE_PATTERN "%${LLVM_PROFILE_MERGE_POOL_SIZE}m.profraw")
+    else()
+      file(TO_NATIVE_PATH "${LLVM_PROFILE_DATA_DIR}/%${LLVM_PROFILE_MERGE_POOL_SIZE}m.profraw" LLVM_PROFILE_FILE_PATTERN)
+    endif()
+  endif()
 endif()
 
 # All options referred to from HandleLLVMOptions have to be specified
@@ -718,6 +732,8 @@ if( LLVM_INCLUDE_TOOLS )
   add_subdirectory(tools)
 endif()
 
+add_subdirectory(runtimes)
+
 if( LLVM_INCLUDE_EXAMPLES )
   add_subdirectory(examples)
 endif()
@@ -728,7 +744,8 @@ if( LLVM_INCLUDE_TESTS )
     llvm_ExternalProject_Add(test-suite ${LLVM_MAIN_SRC_DIR}/projects/test-suite
       USE_TOOLCHAIN
       EXCLUDE_FROM_ALL
-      NO_INSTALL)
+      NO_INSTALL
+      ALWAYS_CLEAN)
   endif()
   add_subdirectory(test)
   add_subdirectory(unittests)

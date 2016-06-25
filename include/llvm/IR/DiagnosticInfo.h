@@ -34,7 +34,7 @@ class Module;
 class SMDiagnostic;
 
 /// \brief Defines the different supported severity of a diagnostic.
-enum DiagnosticSeverity {
+enum DiagnosticSeverity : char {
   DS_Error,
   DS_Warning,
   DS_Remark,
@@ -48,9 +48,11 @@ enum DiagnosticSeverity {
 enum DiagnosticKind {
   DK_Bitcode,
   DK_InlineAsm,
+  DK_ResourceLimit,
   DK_StackSize,
   DK_Linker,
   DK_DebugMetadataVersion,
+  DK_DebugMetadataInvalid,
   DK_SampleProfile,
   DK_OptimizationRemark,
   DK_OptimizationRemarkMissed,
@@ -159,27 +161,62 @@ public:
   }
 };
 
-/// Diagnostic information for stack size reporting.
+/// Diagnostic information for stack size etc. reporting.
 /// This is basically a function and a size.
-class DiagnosticInfoStackSize : public DiagnosticInfo {
+class DiagnosticInfoResourceLimit : public DiagnosticInfo {
 private:
-  /// The function that is concerned by this stack size diagnostic.
+  /// The function that is concerned by this resource limit diagnostic.
   const Function &Fn;
-  /// The computed stack size.
-  unsigned StackSize;
+
+  /// Description of the resource type (e.g. stack size)
+  const char *ResourceName;
+
+  /// The computed size usage
+  uint64_t ResourceSize;
+
+  // Threshould passed
+  uint64_t ResourceLimit;
 
 public:
   /// \p The function that is concerned by this stack size diagnostic.
   /// \p The computed stack size.
-  DiagnosticInfoStackSize(const Function &Fn, unsigned StackSize,
-                          DiagnosticSeverity Severity = DS_Warning)
-      : DiagnosticInfo(DK_StackSize, Severity), Fn(Fn), StackSize(StackSize) {}
+  DiagnosticInfoResourceLimit(const Function &Fn,
+                              const char *ResourceName,
+                              uint64_t ResourceSize,
+                              DiagnosticSeverity Severity = DS_Warning,
+                              DiagnosticKind Kind = DK_ResourceLimit,
+                              uint64_t ResourceLimit = 0)
+      : DiagnosticInfo(Kind, Severity),
+        Fn(Fn),
+        ResourceName(ResourceName),
+        ResourceSize(ResourceSize),
+        ResourceLimit(ResourceLimit) {}
 
   const Function &getFunction() const { return Fn; }
-  unsigned getStackSize() const { return StackSize; }
+  const char *getResourceName() const { return ResourceName; }
+  uint64_t getResourceSize() const { return ResourceSize; }
+  uint64_t getResourceLimit() const { return ResourceLimit; }
 
   /// \see DiagnosticInfo::print.
   void print(DiagnosticPrinter &DP) const override;
+
+  static bool classof(const DiagnosticInfo *DI) {
+    return DI->getKind() == DK_ResourceLimit ||
+           DI->getKind() == DK_StackSize;
+  }
+};
+
+class DiagnosticInfoStackSize : public DiagnosticInfoResourceLimit {
+public:
+  DiagnosticInfoStackSize(const Function &Fn,
+                          uint64_t StackSize,
+                          DiagnosticSeverity Severity = DS_Warning,
+                          uint64_t StackLimit = 0)
+    : DiagnosticInfoResourceLimit(Fn, "stack size", StackSize,
+                                  Severity, DK_StackSize, StackLimit) {}
+
+  uint64_t getStackSize() const { return getResourceSize(); }
+  uint64_t getStackLimit() const { return getResourceLimit(); }
 
   static bool classof(const DiagnosticInfo *DI) {
     return DI->getKind() == DK_StackSize;
@@ -213,6 +250,29 @@ public:
     return DI->getKind() == DK_DebugMetadataVersion;
   }
 };
+
+/// Diagnostic information for stripping invalid debug metadata.
+class DiagnosticInfoIgnoringInvalidDebugMetadata : public DiagnosticInfo {
+private:
+  /// The module that is concerned by this debug metadata version diagnostic.
+  const Module &M;
+
+public:
+  /// \p The module that is concerned by this debug metadata version diagnostic.
+  DiagnosticInfoIgnoringInvalidDebugMetadata(
+      const Module &M, DiagnosticSeverity Severity = DS_Warning)
+      : DiagnosticInfo(DK_DebugMetadataVersion, Severity), M(M) {}
+
+  const Module &getModule() const { return M; }
+
+  /// \see DiagnosticInfo::print.
+  void print(DiagnosticPrinter &DP) const override;
+
+  static bool classof(const DiagnosticInfo *DI) {
+    return DI->getKind() == DK_DebugMetadataInvalid;
+  }
+};
+
 
 /// Diagnostic information for the sample profiler.
 class DiagnosticInfoSampleProfile : public DiagnosticInfo {
@@ -608,8 +668,9 @@ public:
   /// copy this message, so this reference must be valid for the whole life time
   /// of the diagnostic.
   DiagnosticInfoUnsupported(const Function &Fn, const Twine &Msg,
-                            DebugLoc DLoc = DebugLoc())
-      : DiagnosticInfoWithDebugLocBase(DK_Unsupported, DS_Error, Fn, DLoc),
+                            DebugLoc DLoc = DebugLoc(),
+                            DiagnosticSeverity Severity = DS_Error)
+      : DiagnosticInfoWithDebugLocBase(DK_Unsupported, Severity, Fn, DLoc),
         Msg(Msg) {}
 
   static bool classof(const DiagnosticInfo *DI) {

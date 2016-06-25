@@ -19,8 +19,6 @@
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
 
-using namespace llvm;
-
 namespace llvm {
 
 template <typename T> struct EnumEntry {
@@ -80,7 +78,12 @@ public:
     IndentLevel = std::max(0, IndentLevel - Levels);
   }
 
+  void resetIndent() { IndentLevel = 0; }
+
+  void setPrefix(StringRef P) { Prefix = P; }
+
   void printIndent() {
+    OS << Prefix;
     for (int i = 0; i < IndentLevel; ++i)
       OS << "  ";
   }
@@ -187,12 +190,18 @@ public:
     startLine() << Label << ": " << int(Value) << "\n";
   }
 
-  void printNumber(StringRef Label, APSInt Value) {
+  void printNumber(StringRef Label, const APSInt &Value) {
     startLine() << Label << ": " << Value << "\n";
   }
 
   void printBoolean(StringRef Label, bool Value) {
     startLine() << Label << ": " << (Value ? "Yes" : "No") << '\n';
+  }
+
+  template <typename... T> void printVersion(StringRef Label, T... Version) {
+    startLine() << Label << ": ";
+    printVersionInternal(Version...);
+    getOStream() << "\n";
   }
 
   template <typename T> void printList(StringRef Label, const T &List) {
@@ -202,6 +211,19 @@ public:
       if (Comma)
         OS << ", ";
       OS << Item;
+      Comma = true;
+    }
+    OS << "]\n";
+  }
+
+  template <typename T, typename U>
+  void printList(StringRef Label, const T &List, const U &Printer) {
+    startLine() << Label << ": [";
+    bool Comma = false;
+    for (const auto &Item : List) {
+      if (Comma)
+        OS << ", ";
+      Printer(OS, Item);
       Comma = true;
     }
     OS << "]\n";
@@ -231,6 +253,8 @@ public:
   void printSymbolOffset(StringRef Label, StringRef Symbol, T Value) {
     startLine() << Label << ": " << Symbol << '+' << hex(Value) << '\n';
   }
+
+  void printString(StringRef Value) { startLine() << Value << "\n"; }
 
   void printString(StringRef Label, StringRef Value) {
     startLine() << Label << ": " << Value << "\n";
@@ -271,10 +295,18 @@ public:
     printBinaryImpl(Label, StringRef(), V, false);
   }
 
+  void printBinaryBlock(StringRef Label, ArrayRef<uint8_t> Value) {
+    printBinaryImpl(Label, StringRef(), Value, true);
+  }
+
   void printBinaryBlock(StringRef Label, StringRef Value) {
     auto V = makeArrayRef(reinterpret_cast<const uint8_t *>(Value.data()),
                           Value.size());
     printBinaryImpl(Label, StringRef(), V, true);
+  }
+
+  template <typename T> void printObject(StringRef Label, const T &Value) {
+    startLine() << Label << ": " << Value << "\n";
   }
 
   raw_ostream &startLine() {
@@ -285,6 +317,16 @@ public:
   raw_ostream &getOStream() { return OS; }
 
 private:
+  template <typename T> void printVersionInternal(T Value) {
+    getOStream() << Value;
+  }
+
+  template <typename S, typename T, typename... TArgs>
+  void printVersionInternal(S Value, T Value2, TArgs... Args) {
+    getOStream() << Value << ".";
+    printVersionInternal(Value2, Args...);
+  }
+
   template <typename T>
   static bool flagName(const EnumEntry<T> &lhs, const EnumEntry<T> &rhs) {
     return lhs.Name < rhs.Name;
@@ -295,6 +337,7 @@ private:
 
   raw_ostream &OS;
   int IndentLevel;
+  StringRef Prefix;
 };
 
 template <>
@@ -304,33 +347,31 @@ ScopedPrinter::printHex<support::ulittle16_t>(StringRef Label,
   startLine() << Label << ": " << hex(Value) << "\n";
 }
 
-struct DictScope {
-  DictScope(ScopedPrinter &W, StringRef N) : W(W) {
-    W.startLine() << N << " {\n";
+template<char Open, char Close>
+struct DelimitedScope {
+  explicit DelimitedScope(ScopedPrinter &W) : W(W) {
+    W.startLine() << Open << '\n';
     W.indent();
   }
 
-  ~DictScope() {
+  DelimitedScope(ScopedPrinter &W, StringRef N) : W(W) {
+    W.startLine() << N;
+    if (!N.empty())
+      W.getOStream() << ' ';
+    W.getOStream() << Open << '\n';
+    W.indent();
+  }
+
+  ~DelimitedScope() {
     W.unindent();
-    W.startLine() << "}\n";
+    W.startLine() << Close << '\n';
   }
 
   ScopedPrinter &W;
 };
 
-struct ListScope {
-  ListScope(ScopedPrinter &W, StringRef N) : W(W) {
-    W.startLine() << N << " [\n";
-    W.indent();
-  }
-
-  ~ListScope() {
-    W.unindent();
-    W.startLine() << "]\n";
-  }
-
-  ScopedPrinter &W;
-};
+using DictScope = DelimitedScope<'{', '}'>;
+using ListScope = DelimitedScope<'[', ']'>;
 
 } // namespace llvm
 

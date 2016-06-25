@@ -44,7 +44,7 @@ protected:
   enum ARMProcFamilyEnum {
     Others, CortexA5, CortexA7, CortexA8, CortexA9, CortexA12, CortexA15,
     CortexA17, CortexR4, CortexR4F, CortexR5, CortexR7, CortexM3,
-    CortexA32, CortexA35, CortexA53, CortexA57, CortexA72,
+    CortexA32, CortexA35, CortexA53, CortexA57, CortexA72, CortexA73,
     Krait, Swift, ExynosM1
   };
   enum ARMProcClassEnum {
@@ -178,9 +178,9 @@ protected:
   /// movs with shifter operand (i.e. asr, lsl, lsr).
   bool AvoidMOVsShifterOperand;
 
-  /// HasRAS - Some processors perform return stack prediction. CodeGen should
+  /// HasRetAddrStack - Some processors perform return stack prediction. CodeGen should
   /// avoid issue "normal" call instructions to callees which do not return.
-  bool HasRAS;
+  bool HasRetAddrStack;
 
   /// HasMPExtension - True if the subtarget supports Multiprocessing
   /// extension (ARMv7 only).
@@ -211,9 +211,30 @@ protected:
   /// HasCRC - if true, processor supports CRC instructions
   bool HasCRC;
 
+  /// HasRAS - if true, the processor supports RAS extensions
+  bool HasRAS;
+
   /// If true, the instructions "vmov.i32 d0, #0" and "vmov.i32 q0, #0" are
   /// particularly effective at zeroing a VFP register.
   bool HasZeroCycleZeroing;
+
+  /// If true, if conversion may decide to leave some instructions unpredicated.
+  bool IsProfitableToUnpredicate;
+
+  /// If true, VMOV will be favored over VGETLNi32.
+  bool HasSlowVGETLNi32;
+
+  /// If true, VMOV will be favored over VDUP.
+  bool HasSlowVDUP32;
+
+  /// If true, VMOVSR will be favored over VMOVDRR.
+  bool PreferVMOVSR;
+
+  /// If true, ISHST barriers will be used for Release semantics.
+  bool PreferISHST;
+
+  /// If true, VMOVRS, VMOVSR and VMOVS will be converted from VFP to NEON.
+  bool UseNEONForFPMovs;
 
   /// StrictAlign - If true, the subtarget disallows unaligned memory
   /// accesses for some types.  For details, see
@@ -349,6 +370,7 @@ public:
   bool hasNEON() const { return HasNEON;  }
   bool hasCrypto() const { return HasCrypto; }
   bool hasCRC() const { return HasCRC; }
+  bool hasRAS() const { return HasRAS; }
   bool hasVirtualization() const { return HasVirtualization; }
   bool useNEONForSinglePrecisionFP() const {
     return hasNEON() && UseNEONForSinglePrecisionFP;
@@ -372,10 +394,16 @@ public:
   bool hasTrustZone() const { return HasTrustZone; }
   bool has8MSecExt() const { return Has8MSecExt; }
   bool hasZeroCycleZeroing() const { return HasZeroCycleZeroing; }
+  bool isProfitableToUnpredicate() const { return IsProfitableToUnpredicate; }
+  bool hasSlowVGETLNi32() const { return HasSlowVGETLNi32; }
+  bool hasSlowVDUP32() const { return HasSlowVDUP32; }
+  bool preferVMOVSR() const { return PreferVMOVSR; }
+  bool preferISHSTBarriers() const { return PreferISHST; }
+  bool useNEONForFPMovs() const { return UseNEONForFPMovs; }
   bool prefers32BitThumb() const { return Pref32BitThumb; }
   bool avoidCPSRPartialUpdate() const { return AvoidCPSRPartialUpdate; }
   bool avoidMOVsShifterOperand() const { return AvoidMOVsShifterOperand; }
-  bool hasRAS() const { return HasRAS; }
+  bool hasRetAddrStack() const { return HasRetAddrStack; }
   bool hasMPExtension() const { return HasMPExtension; }
   bool hasDSP() const { return HasDSP; }
   bool useNaClTrap() const { return UseNaClTrap; }
@@ -453,6 +481,13 @@ public:
 
   bool isR9Reserved() const {
     return isTargetMachO() ? (ReserveR9 || !HasV6Ops) : ReserveR9;
+  }
+
+  /// Returns true if the frame setup is split into two separate pushes (first
+  /// r0-r7,lr then r8-r11), principally so that the frame pointer is adjacent
+  /// to lr.
+  bool splitFramePushPop() const {
+    return isTargetMachO();
   }
 
   bool useStride4VFPs(const MachineFunction &MF) const;

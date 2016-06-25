@@ -79,7 +79,7 @@ void IRObjectFile::CollectAsmUndefinedRefs(
 
   MCObjectFileInfo MOFI;
   MCContext MCCtx(MAI.get(), MRI.get(), &MOFI);
-  MOFI.InitMCObjectFileInfo(TT, Reloc::Default, CodeModel::Default, MCCtx);
+  MOFI.InitMCObjectFileInfo(TT, /*PIC*/ false, CodeModel::Default, MCCtx);
   std::unique_ptr<RecordStreamer> Streamer(new RecordStreamer(MCCtx));
   T->createNullTargetStreamer(*Streamer);
 
@@ -114,6 +114,10 @@ void IRObjectFile::CollectAsmUndefinedRefs(
     case RecordStreamer::Global:
     case RecordStreamer::Used:
       Res |= BasicSymbolRef::SF_Undefined;
+      Res |= BasicSymbolRef::SF_Global;
+      break;
+    case RecordStreamer::GlobalWeak:
+      Res |= BasicSymbolRef::SF_Weak;
       Res |= BasicSymbolRef::SF_Global;
       break;
     }
@@ -248,7 +252,7 @@ uint32_t IRObjectFile::getSymbolFlags(DataRefImpl Symb) const {
   if (GV->getName().startswith("llvm."))
     Res |= BasicSymbolRef::SF_FormatSpecific;
   else if (auto *Var = dyn_cast<GlobalVariable>(GV)) {
-    if (Var->getSection() == StringRef("llvm.metadata"))
+    if (Var->getSection() == "llvm.metadata")
       Res |= BasicSymbolRef::SF_FormatSpecific;
   }
 

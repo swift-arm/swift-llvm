@@ -336,11 +336,11 @@ def load_param : LoadParamFrag<load>;
 def load_param_exti8 : LoadParamFrag<az_extloadi8>;
 def load_param_exti16 : LoadParamFrag<az_extloadi16>;
 
-def isR600 : Predicate<"Subtarget->getGeneration() <= AMDGPUSubtarget::R700">;
+def isR600 : Predicate<"Subtarget->getGeneration() <= R600Subtarget::R700">;
 
 def isR600toCayman
     : Predicate<
-          "Subtarget->getGeneration() <= AMDGPUSubtarget::NORTHERN_ISLANDS">;
+          "Subtarget->getGeneration() <= R600Subtarget::NORTHERN_ISLANDS">;
 
 //===----------------------------------------------------------------------===//
 // R600 SDNodes
@@ -759,6 +759,13 @@ def : Pat <
   (imm:$val),
   (MOV_IMM_I32 imm:$val)
 >;
+
+def MOV_IMM_GLOBAL_ADDR : MOV_IMM<iPTR, i32imm>;
+def : Pat <
+  (AMDGPUconstdata_ptr tglobaladdr:$addr),
+  (MOV_IMM_GLOBAL_ADDR tglobaladdr:$addr)
+>;
+
 
 def MOV_IMM_F32 : MOV_IMM<f32, f32imm>;
 def : Pat <
@@ -1532,8 +1539,9 @@ let isTerminator = 1, usesCustomInserter = 1, isBranch = 1, isBarrier = 1 in {
 //===---------------------------------------------------------------------===//
 let isTerminator = 1, isReturn = 1, hasCtrlDep = 1,
     usesCustomInserter = 1 in {
-  def RETURN          : ILFormat<(outs), (ins variable_ops),
-      "RETURN", [(IL_retflag)]>;
+  def RETURN : ILFormat<(outs), (ins variable_ops),
+    "RETURN", [(AMDGPUendpgm)]
+  >;
 }
 
 //===----------------------------------------------------------------------===//

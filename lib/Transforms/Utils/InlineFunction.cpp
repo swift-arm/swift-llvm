@@ -1265,7 +1265,8 @@ static bool hasLifetimeMarkers(AllocaInst *AI) {
 /// Rebuild the entire inlined-at chain for this instruction so that the top of
 /// the chain now is inlined-at the new call site.
 static DebugLoc
-updateInlinedAtInfo(DebugLoc DL, DILocation *InlinedAtNode, LLVMContext &Ctx,
+updateInlinedAtInfo(const DebugLoc &DL, DILocation *InlinedAtNode,
+                    LLVMContext &Ctx,
                     DenseMap<const DILocation *, DILocation *> &IANodes) {
   SmallVector<DILocation *, 3> InlinedAtLocations;
   DILocation *Last = InlinedAtNode;
@@ -1286,8 +1287,7 @@ updateInlinedAtInfo(DebugLoc DL, DILocation *InlinedAtNode, LLVMContext &Ctx,
   // Starting from the top, rebuild the nodes to point to the new inlined-at
   // location (then rebuilding the rest of the chain behind it) and update the
   // map of already-constructed inlined-at nodes.
-  for (const DILocation *MD : make_range(InlinedAtLocations.rbegin(),
-                                         InlinedAtLocations.rend())) {
+  for (const DILocation *MD : reverse(InlinedAtLocations)) {
     Last = IANodes[MD] = DILocation::getDistinct(
         Ctx, MD->getLine(), MD->getColumn(), MD->getScope(), Last);
   }
@@ -1301,7 +1301,7 @@ updateInlinedAtInfo(DebugLoc DL, DILocation *InlinedAtNode, LLVMContext &Ctx,
 /// to encode location where these instructions are inlined.
 static void fixupLineNumbers(Function *Fn, Function::iterator FI,
                              Instruction *TheCall) {
-  DebugLoc TheCallDL = TheCall->getDebugLoc();
+  const DebugLoc &TheCallDL = TheCall->getDebugLoc();
   if (!TheCallDL)
     return;
 
@@ -1874,7 +1874,13 @@ bool llvm::InlineFunction(CallSite CS, InlineFunctionInfo &IFI,
           continue;
         }
 
-        auto CallingConv = DeoptCall->getCallingConv();
+        // The calling convention on the deoptimize call itself may be bogus,
+        // since the code we're inlining may have undefined behavior (and may
+        // never actually execute at runtime); but all
+        // @llvm.experimental.deoptimize declarations have to have the same
+        // calling convention in a well-formed module.
+        auto CallingConv = DeoptCall->getCalledFunction()->getCallingConv();
+        NewDeoptIntrinsic->setCallingConv(CallingConv);
         auto *CurBB = RI->getParent();
         RI->eraseFromParent();
 

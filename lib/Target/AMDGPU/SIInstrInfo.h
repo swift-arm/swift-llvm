@@ -25,6 +25,21 @@ namespace llvm {
 class SIInstrInfo final : public AMDGPUInstrInfo {
 private:
   const SIRegisterInfo RI;
+  const SISubtarget &ST;
+
+  // The the inverse predicate should have the negative value.
+  enum BranchPredicate {
+    INVALID_BR = 0,
+    SCC_TRUE = 1,
+    SCC_FALSE = -1,
+    VCCNZ = 2,
+    VCCZ = -2,
+    EXECNZ = -3,
+    EXECZ = 3
+  };
+
+  static unsigned getBranchOpcode(BranchPredicate Cond);
+  static BranchPredicate getBranchPredicate(unsigned Opcode);
 
   unsigned buildExtractSubReg(MachineBasicBlock::iterator MI,
                               MachineRegisterInfo &MRI,
@@ -77,9 +92,9 @@ protected:
                                        unsigned OpIdx1) const override;
 
 public:
-  explicit SIInstrInfo(const AMDGPUSubtarget &st);
+  explicit SIInstrInfo(const SISubtarget &);
 
-  const SIRegisterInfo &getRegisterInfo() const override {
+  const SIRegisterInfo &getRegisterInfo() const {
     return RI;
   }
 
@@ -98,9 +113,8 @@ public:
                            MachineInstr *SecondLdSt,
                            unsigned NumLoads) const final;
 
-  void copyPhysReg(MachineBasicBlock &MBB,
-                   MachineBasicBlock::iterator MI, DebugLoc DL,
-                   unsigned DestReg, unsigned SrcReg,
+  void copyPhysReg(MachineBasicBlock &MBB, MachineBasicBlock::iterator MI,
+                   const DebugLoc &DL, unsigned DestReg, unsigned SrcReg,
                    bool KillSrc) const override;
 
   unsigned calculateLDSSpillAddress(MachineBasicBlock &MBB,
@@ -135,6 +149,20 @@ public:
   bool findCommutedOpIndices(MachineInstr *MI,
                              unsigned &SrcOpIdx1,
                              unsigned &SrcOpIdx2) const override;
+
+  bool AnalyzeBranch(MachineBasicBlock &MBB, MachineBasicBlock *&TBB,
+                     MachineBasicBlock *&FBB,
+                     SmallVectorImpl<MachineOperand> &Cond,
+                     bool AllowModify) const override;
+
+  unsigned RemoveBranch(MachineBasicBlock &MBB) const override;
+
+  unsigned InsertBranch(MachineBasicBlock &MBB, MachineBasicBlock *TBB,
+                        MachineBasicBlock *FBB, ArrayRef<MachineOperand> Cond,
+                        const DebugLoc &DL) const override;
+
+  bool ReverseBranchCondition(
+    SmallVectorImpl<MachineOperand> &Cond) const override;
 
   bool areMemAccessesTriviallyDisjoint(
     MachineInstr *MIa, MachineInstr *MIb,
@@ -484,6 +512,8 @@ public:
     return get(pseudoToMCOpcode(Opcode));
   }
 
+  unsigned getInstSizeInBytes(const MachineInstr &MI) const;
+
   ArrayRef<std::pair<int, const char *>>
   getSerializableTargetIndices() const override;
 
@@ -493,7 +523,6 @@ public:
 
   ScheduleHazardRecognizer *
   CreateTargetPostRAHazardRecognizer(const MachineFunction &MF) const override;
-
 };
 
 namespace AMDGPU {
@@ -519,8 +548,9 @@ namespace AMDGPU {
   int getAtomicNoRetOp(uint16_t Opcode);
 
   const uint64_t RSRC_DATA_FORMAT = 0xf00000000000LL;
-  const uint64_t RSRC_TID_ENABLE = 1LL << 55;
-  const uint64_t RSRC_ELEMENT_SIZE_SHIFT = 51;
+  const uint64_t RSRC_ELEMENT_SIZE_SHIFT = (32 + 19);
+  const uint64_t RSRC_INDEX_STRIDE_SHIFT = (32 + 21);
+  const uint64_t RSRC_TID_ENABLE = UINT64_C(1) << (32 + 23);
 } // End namespace AMDGPU
 
 namespace SI {

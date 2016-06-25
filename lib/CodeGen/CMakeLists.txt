@@ -82,7 +82,6 @@ add_llvm_library(LLVMCodeGen
   MIRPrintingPass.cpp
   OptimizePHIs.cpp
   ParallelCG.cpp
-  Passes.cpp
   PeepholeOptimizer.cpp
   PHIElimination.cpp
   PHIEliminationUtils.cpp
@@ -101,6 +100,10 @@ add_llvm_library(LLVMCodeGen
   RegisterCoalescer.cpp
   RegisterPressure.cpp
   RegisterScavenging.cpp
+  RenameIndependentSubregs.cpp
+  RegisterUsageInfo.cpp
+  RegUsageInfoCollector.cpp
+  RegUsageInfoPropagate.cpp
   SafeStack.cpp
   ScheduleDAG.cpp
   ScheduleDAGInstrs.cpp
@@ -124,6 +127,7 @@ add_llvm_library(LLVMCodeGen
   TargetLoweringBase.cpp
   TargetLoweringObjectFileImpl.cpp
   TargetOptionsImpl.cpp
+  TargetPassConfig.cpp
   TargetRegisterInfo.cpp
   TargetSchedule.cpp
   TwoAddressInstructionPass.cpp

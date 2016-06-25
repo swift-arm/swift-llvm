@@ -31,6 +31,10 @@ def SDT_PPCvperm   : SDTypeProfile<1, 3, [
   SDTCisVT<3, v16i8>, SDTCisSameAs<0, 1>, SDTCisSameAs<0, 2>
 ]>;
 
+def SDT_PPCVecSplat : SDTypeProfile<1, 2, [ SDTCisVec<0>,
+  SDTCisVec<1>, SDTCisInt<2>
+]>;
+
 def SDT_PPCvcmp : SDTypeProfile<1, 3, [
   SDTCisSameAs<0, 1>, SDTCisSameAs<1, 2>, SDTCisVT<3, i32>
 ]>;
@@ -141,6 +145,7 @@ def PPCaddisDtprelHA : SDNode<"PPCISD::ADDIS_DTPREL_HA", SDTIntBinOp>;
 def PPCaddiDtprelL   : SDNode<"PPCISD::ADDI_DTPREL_L", SDTIntBinOp>;
 
 def PPCvperm    : SDNode<"PPCISD::VPERM", SDT_PPCvperm, []>;
+def PPCxxsplt    : SDNode<"PPCISD::XXSPLT", SDT_PPCVecSplat, []>;
 
 def PPCqvfperm   : SDNode<"PPCISD::QVFPERM", SDT_PPCqvfperm, []>;
 def PPCqvgpci    : SDNode<"PPCISD::QVGPCI", SDT_PPCqvgpci, []>;
@@ -257,7 +262,7 @@ def HI16 : SDNodeXForm<imm, [{
 
 def HA16 : SDNodeXForm<imm, [{
   // Transformation function: shift the immediate value down into the low bits.
-  signed int Val = N->getZExtValue();
+  int Val = N->getZExtValue();
   return getI32Imm((Val - (signed short)Val) >> 16, SDLoc(N));
 }]>;
 def MB : SDNodeXForm<imm, [{
@@ -2339,6 +2344,10 @@ let isCodeGenOnly = 1 in {
                                 "mfspr $rT, 256", IIC_IntGeneral>,
                   PPC970_DGroup_First, PPC970_Unit_FXU;
 }
+
+// Aliases for mtvrsave/mfvrsave to mfspr/mtspr.
+def : InstAlias<"mtvrsave $rS", (MTVRSAVE gprc:$rS)>;
+def : InstAlias<"mfvrsave $rS", (MFVRSAVE gprc:$rS)>;
 
 // SPILL_VRSAVE - Indicate that we're dumping the VRSAVE register,
 // so we'll need to scavenge a register for it.

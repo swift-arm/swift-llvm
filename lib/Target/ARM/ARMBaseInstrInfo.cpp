@@ -390,11 +390,11 @@ unsigned ARMBaseInstrInfo::RemoveBranch(MachineBasicBlock &MBB) const {
   return 2;
 }
 
-unsigned
-ARMBaseInstrInfo::InsertBranch(MachineBasicBlock &MBB, MachineBasicBlock *TBB,
-                               MachineBasicBlock *FBB,
-                               ArrayRef<MachineOperand> Cond,
-                               DebugLoc DL) const {
+unsigned ARMBaseInstrInfo::InsertBranch(MachineBasicBlock &MBB,
+                                        MachineBasicBlock *TBB,
+                                        MachineBasicBlock *FBB,
+                                        ArrayRef<MachineOperand> Cond,
+                                        const DebugLoc &DL) const {
   ARMFunctionInfo *AFI = MBB.getParent()->getInfo<ARMFunctionInfo>();
   int BOpc   = !AFI->isThumbFunction()
     ? ARM::B : (AFI->isThumb2Function() ? ARM::t2B : ARM::tB);
@@ -701,9 +701,9 @@ void ARMBaseInstrInfo::copyToCPSR(MachineBasicBlock &MBB,
 }
 
 void ARMBaseInstrInfo::copyPhysReg(MachineBasicBlock &MBB,
-                                   MachineBasicBlock::iterator I, DebugLoc DL,
-                                   unsigned DestReg, unsigned SrcReg,
-                                   bool KillSrc) const {
+                                   MachineBasicBlock::iterator I,
+                                   const DebugLoc &DL, unsigned DestReg,
+                                   unsigned SrcReg, bool KillSrc) const {
   bool GPRDest = ARM::GPRRegClass.contains(DestReg);
   bool GPRSrc = ARM::GPRRegClass.contains(SrcReg);
 
@@ -1766,9 +1766,9 @@ isProfitableToIfCvt(MachineBasicBlock &TMBB,
 bool
 ARMBaseInstrInfo::isProfitableToUnpredicate(MachineBasicBlock &TMBB,
                                             MachineBasicBlock &FMBB) const {
-  // Reduce false anti-dependencies to let Swift's out-of-order execution
+  // Reduce false anti-dependencies to let the target's out-of-order execution
   // engine do its thing.
-  return Subtarget.isSwift();
+  return Subtarget.isProfitableToUnpredicate();
 }
 
 /// getInstrPredicate - If instruction is predicated, returns its predicate
@@ -1995,10 +1995,12 @@ unsigned llvm::convertAddSubFlagsOpcode(unsigned OldOpc) {
 }
 
 void llvm::emitARMRegPlusImmediate(MachineBasicBlock &MBB,
-                               MachineBasicBlock::iterator &MBBI, DebugLoc dl,
-                               unsigned DestReg, unsigned BaseReg, int NumBytes,
-                               ARMCC::CondCodes Pred, unsigned PredReg,
-                               const ARMBaseInstrInfo &TII, unsigned MIFlags) {
+                                   MachineBasicBlock::iterator &MBBI,
+                                   const DebugLoc &dl, unsigned DestReg,
+                                   unsigned BaseReg, int NumBytes,
+                                   ARMCC::CondCodes Pred, unsigned PredReg,
+                                   const ARMBaseInstrInfo &TII,
+                                   unsigned MIFlags) {
   if (NumBytes == 0 && DestReg != BaseReg) {
     BuildMI(MBB, MBBI, dl, TII.get(ARM::MOVr), DestReg)
       .addReg(BaseReg, RegState::Kill)
@@ -3149,7 +3151,7 @@ ARMBaseInstrInfo::getNumMicroOps(const InstrItineraryData *ItinData,
       if (NumRegs % 2)
         ++A8UOps;
       return A8UOps;
-    } else if (Subtarget.isLikeA9() || Subtarget.isSwift()) {
+    } else if (Subtarget.isLikeA9()) {
       int A9UOps = (NumRegs / 2);
       // If there are odd number of registers or if it's not 64-bit aligned,
       // then it takes an extra AGU (Address Generation Unit) cycle.
@@ -4176,7 +4178,7 @@ ARMBaseInstrInfo::getExecutionDomain(const MachineInstr *MI) const {
 
     // CortexA9 is particularly picky about mixing the two and wants these
     // converted.
-    if (Subtarget.isCortexA9() && !isPredicated(*MI) &&
+    if (Subtarget.useNEONForFPMovs() && !isPredicated(*MI) &&
         (MI->getOpcode() == ARM::VMOVRS || MI->getOpcode() == ARM::VMOVSR ||
          MI->getOpcode() == ARM::VMOVS))
       return std::make_pair(ExeVFP, (1 << ExeVFP) | (1 << ExeNEON));

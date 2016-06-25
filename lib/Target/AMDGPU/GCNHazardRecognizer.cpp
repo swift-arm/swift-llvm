@@ -25,7 +25,8 @@ using namespace llvm;
 
 GCNHazardRecognizer::GCNHazardRecognizer(const MachineFunction &MF) :
   CurrCycleInstr(nullptr),
-  MF(MF) {
+  MF(MF),
+  ST(MF.getSubtarget<SISubtarget>()) {
   MaxLookAhead = 5;
 }
 
@@ -81,8 +82,7 @@ void GCNHazardRecognizer::AdvanceCycle() {
   if (!CurrCycleInstr)
     return;
 
-  const SIInstrInfo *TII =
-      static_cast<const SIInstrInfo*>(MF.getSubtarget().getInstrInfo());
+  const SIInstrInfo *TII = ST.getInstrInfo();
   unsigned NumWaitStates = TII->getNumWaitStates(*CurrCycleInstr);
 
   // Keep track of emitted instructions
@@ -112,10 +112,9 @@ void GCNHazardRecognizer::RecedeCycle() {
 // Helper Functions
 //===----------------------------------------------------------------------===//
 
-int GCNHazardRecognizer::getWaitStatesSinceDef(unsigned Reg,
-                              std::function<bool(MachineInstr*)> IsHazardDef ) {
-  const TargetRegisterInfo *TRI =
-      MF.getSubtarget<AMDGPUSubtarget>().getRegisterInfo();
+int GCNHazardRecognizer::getWaitStatesSinceDef(
+    unsigned Reg, function_ref<bool(MachineInstr *)> IsHazardDef) {
+  const SIRegisterInfo *TRI = ST.getRegisterInfo();
 
   int WaitStates = -1;
   for (MachineInstr *MI : EmittedInstrs) {
@@ -141,10 +140,8 @@ static void addRegsToSet(iterator_range<MachineInstr::const_mop_iterator> Ops,
 }
 
 int GCNHazardRecognizer::checkSMEMSoftClauseHazards(MachineInstr *SMEM) {
-  const AMDGPUSubtarget &ST = MF.getSubtarget<AMDGPUSubtarget>();
-
   // SMEM soft clause are only present on VI+
-  if (ST.getGeneration() < AMDGPUSubtarget::VOLCANIC_ISLANDS)
+  if (ST.getGeneration() < SISubtarget::VOLCANIC_ISLANDS)
     return 0;
 
   // A soft-clause is any group of consecutive SMEM instructions.  The
@@ -157,7 +154,6 @@ int GCNHazardRecognizer::checkSMEMSoftClauseHazards(MachineInstr *SMEM) {
   // (including itself). If we encounter this situaion, we need to break the
   // clause by inserting a non SMEM instruction.
 
-  const SIInstrInfo *TII = static_cast<const SIInstrInfo*>(ST.getInstrInfo());
   std::set<unsigned> ClauseDefs;
   std::set<unsigned> ClauseUses;
 
@@ -165,7 +161,7 @@ int GCNHazardRecognizer::checkSMEMSoftClauseHazards(MachineInstr *SMEM) {
 
     // When we hit a non-SMEM instruction then we have passed the start of the
     // clause and we can stop.
-    if (!MI || !TII->isSMRD(*MI))
+    if (!MI || !SIInstrInfo::isSMRD(*MI))
       break;
 
     addRegsToSet(MI->defs(), ClauseDefs);
@@ -199,14 +195,14 @@ int GCNHazardRecognizer::checkSMEMSoftClauseHazards(MachineInstr *SMEM) {
 }
 
 int GCNHazardRecognizer::checkSMRDHazards(MachineInstr *SMRD) {
-  const AMDGPUSubtarget &ST = MF.getSubtarget<AMDGPUSubtarget>();
-  const SIInstrInfo *TII = static_cast<const SIInstrInfo*>(ST.getInstrInfo());
+  const SISubtarget &ST = MF.getSubtarget<SISubtarget>();
+  const SIInstrInfo *TII = ST.getInstrInfo();
   int WaitStatesNeeded = 0;
 
   WaitStatesNeeded = checkSMEMSoftClauseHazards(SMRD);
 
   // This SMRD hazard only affects SI.
-  if (ST.getGeneration() != AMDGPUSubtarget::SOUTHERN_ISLANDS)
+  if (ST.getGeneration() != SISubtarget::SOUTHERN_ISLANDS)
     return WaitStatesNeeded;
 
   // A read of an SGPR by SMRD instruction requires 4 wait states when the
@@ -225,10 +221,9 @@ int GCNHazardRecognizer::checkSMRDHazards(MachineInstr *SMRD) {
 }
 
 int GCNHazardRecognizer::checkVMEMHazards(MachineInstr* VMEM) {
-  const AMDGPUSubtarget &ST = MF.getSubtarget<AMDGPUSubtarget>();
-  const SIInstrInfo *TII = static_cast<const SIInstrInfo*>(ST.getInstrInfo());
+  const SIInstrInfo *TII = ST.getInstrInfo();
 
-  if (ST.getGeneration() < AMDGPUSubtarget::VOLCANIC_ISLANDS)
+  if (ST.getGeneration() < SISubtarget::VOLCANIC_ISLANDS)
     return 0;
 
   const SIRegisterInfo &TRI = TII->getRegisterInfo();
@@ -251,9 +246,7 @@ int GCNHazardRecognizer::checkVMEMHazards(MachineInstr* VMEM) {
 }
 
 int GCNHazardRecognizer::checkDPPHazards(MachineInstr *DPP) {
-  const AMDGPUSubtarget &ST = MF.getSubtarget<AMDGPUSubtarget>();
-  const SIRegisterInfo *TRI =
-      static_cast<const SIRegisterInfo*>(ST.getRegisterInfo());
+  const SIRegisterInfo *TRI = ST.getRegisterInfo();
 
   // Check for DPP VGPR read after VALU VGPR write.
   int DppVgprWaitStates = 2;

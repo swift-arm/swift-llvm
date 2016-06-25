@@ -216,12 +216,6 @@ def FeatureDumpCodeLower : SubtargetFeature <"dumpcode",
   "Dump MachineInstrs in the CodeEmitter"
 >;
 
-def FeatureIRStructurizer : SubtargetFeature <"disable-irstructurizer",
-  "EnableIRStructurizer",
-  "false",
-  "Disable IR Structurizer"
->;
-
 def FeaturePromoteAlloca : SubtargetFeature <"promote-alloca",
   "EnablePromoteAlloca",
   "true",
@@ -325,14 +319,14 @@ def FeatureDebuggerInsertNops : SubtargetFeature<
   "amdgpu-debugger-insert-nops",
   "DebuggerInsertNops",
   "true",
-  "Insert two nop instructions for each high level source statement"
+  "Insert one nop instruction for each high level source statement"
 >;
 
-def FeatureDebuggerReserveTrapRegs : SubtargetFeature<
-  "amdgpu-debugger-reserve-trap-regs",
-  "DebuggerReserveTrapVGPRs",
+def FeatureDebuggerReserveRegs : SubtargetFeature<
+  "amdgpu-debugger-reserve-regs",
+  "DebuggerReserveRegs",
   "true",
-  "Reserve VGPRs for trap handler usage"
+  "Reserve registers for debugger usage"
 >;
 
 //===----------------------------------------------------------------------===//

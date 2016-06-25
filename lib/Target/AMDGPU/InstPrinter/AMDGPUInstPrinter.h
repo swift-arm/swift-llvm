@@ -64,7 +64,8 @@ private:
   void printImmediate32(uint32_t I, raw_ostream &O);
   void printImmediate64(uint64_t I, raw_ostream &O);
   void printOperand(const MCInst *MI, unsigned OpNo, raw_ostream &O);
-  void printOperandAndMods(const MCInst *MI, unsigned OpNo, raw_ostream &O);
+  void printOperandAndFPInputMods(const MCInst *MI, unsigned OpNo, raw_ostream &O);
+  void printOperandAndIntInputMods(const MCInst *MI, unsigned OpNo, raw_ostream &O);
   void printDPPCtrl(const MCInst *MI, unsigned OpNo, raw_ostream &O);
   void printRowMask(const MCInst *MI, unsigned OpNo, raw_ostream &O);
   void printBankMask(const MCInst *MI, unsigned OpNo, raw_ostream &O);
@@ -82,7 +83,7 @@ private:
   static void printClamp(const MCInst *MI, unsigned OpNo, raw_ostream &O);
   static void printClampSI(const MCInst *MI, unsigned OpNo, raw_ostream &O);
   static void printOModSI(const MCInst *MI, unsigned OpNo, raw_ostream &O);
-  static void printLiteral(const MCInst *MI, unsigned OpNo, raw_ostream &O);
+  void printLiteral(const MCInst *MI, unsigned OpNo, raw_ostream &O);
   static void printLast(const MCInst *MI, unsigned OpNo, raw_ostream &O);
   static void printNeg(const MCInst *MI, unsigned OpNo, raw_ostream &O);
   static void printOMOD(const MCInst *MI, unsigned OpNo, raw_ostream &O);

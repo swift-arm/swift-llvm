@@ -1,11 +1,10 @@
-//===-- SIMachineFunctionInfo.cpp - SI Machine Function Info -------===//
+//===-- SIMachineFunctionInfo.cpp -------- SI Machine Function Info -------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
 // This file is distributed under the University of Illinois Open Source
 // License. See LICENSE.TXT for details.
 //
-/// \file
 //===----------------------------------------------------------------------===//
 
 
@@ -22,6 +21,11 @@
 
 using namespace llvm;
 
+static cl::opt<bool> EnableSpillSGPRToVGPR(
+  "amdgpu-spill-sgpr-to-vgpr",
+  cl::desc("Enable spilling VGPRs to SGPRs"),
+  cl::ReallyHidden,
+  cl::init(true));
 
 // Pin the vtable to this file.
 void SIMachineFunctionInfo::anchor() {}
@@ -49,7 +53,7 @@ SIMachineFunctionInfo::SIMachineFunctionInfo(const MachineFunction &MF)
     PSInputAddr(0),
     ReturnsVoid(true),
     MaximumWorkGroupSize(0),
-    DebuggerReserveTrapVGPRCount(0),
+    DebuggerReservedVGPRCount(0),
     LDSWaveSpillSize(0),
     PSInputEna(0),
     NumUserSGPRs(0),
@@ -75,7 +79,7 @@ SIMachineFunctionInfo::SIMachineFunctionInfo(const MachineFunction &MF)
     WorkItemIDX(false),
     WorkItemIDY(false),
     WorkItemIDZ(false) {
-  const AMDGPUSubtarget &ST = MF.getSubtarget<AMDGPUSubtarget>();
+  const SISubtarget &ST = MF.getSubtarget<SISubtarget>();
   const Function *F = MF.getFunction();
 
   PSInputAddr = AMDGPU::getInitialPSInputAddr(*F);
@@ -125,7 +129,7 @@ SIMachineFunctionInfo::SIMachineFunctionInfo(const MachineFunction &MF)
   // We don't need to worry about accessing spills with flat instructions.
   // TODO: On VI where we must use flat for global, we should be able to omit
   // this if it is never used for generic access.
-  if (HasStackObjects && ST.getGeneration() >= AMDGPUSubtarget::SEA_ISLANDS &&
+  if (HasStackObjects && ST.getGeneration() >= SISubtarget::SEA_ISLANDS &&
       ST.isAmdHsaOS())
     FlatScratchInit = true;
 
@@ -134,8 +138,8 @@ SIMachineFunctionInfo::SIMachineFunctionInfo(const MachineFunction &MF)
   else
     MaximumWorkGroupSize = ST.getWavefrontSize();
 
-  if (ST.debuggerReserveTrapVGPRs())
-    DebuggerReserveTrapVGPRCount = 4;
+  if (ST.debuggerReserveRegs())
+    DebuggerReservedVGPRCount = 4;
 }
 
 unsigned SIMachineFunctionInfo::addPrivateSegmentBuffer(
@@ -174,13 +178,17 @@ unsigned SIMachineFunctionInfo::addFlatScratchInit(const SIRegisterInfo &TRI) {
   return FlatScratchInitUserSGPR;
 }
 
-SIMachineFunctionInfo::SpilledReg SIMachineFunctionInfo::getSpilledReg(
+SIMachineFunctionInfo::SpilledReg SIMachineFunctionInfo::getSpilledReg (
                                                        MachineFunction *MF,
                                                        unsigned FrameIndex,
                                                        unsigned SubIdx) {
+  if (!EnableSpillSGPRToVGPR)
+    return SpilledReg();
+
+  const SISubtarget &ST = MF->getSubtarget<SISubtarget>();
+  const SIRegisterInfo *TRI = ST.getRegisterInfo();
+
   MachineFrameInfo *FrameInfo = MF->getFrameInfo();
-  const SIRegisterInfo *TRI = static_cast<const SIRegisterInfo *>(
-      MF->getSubtarget<AMDGPUSubtarget>().getRegisterInfo());
   MachineRegisterInfo &MRI = MF->getRegInfo();
   int64_t Offset = FrameInfo->getObjectOffset(FrameIndex);
   Offset += SubIdx * 4;

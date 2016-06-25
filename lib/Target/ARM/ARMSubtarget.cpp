@@ -22,6 +22,7 @@
 #include "Thumb1FrameLowering.h"
 #include "Thumb1InstrInfo.h"
 #include "Thumb2InstrInfo.h"
+#include "llvm/CodeGen/Analysis.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/Function.h"
@@ -89,7 +90,28 @@ ARMSubtarget::ARMSubtarget(const Triple &TT, const std::string &CPU,
                            const std::string &FS,
                            const ARMBaseTargetMachine &TM, bool IsLittle)
     : ARMGenSubtargetInfo(TT, CPU, FS), ARMProcFamily(Others),
-      ARMProcClass(None), ARMArch(ARMv4t), stackAlignment(4), CPUString(CPU),
+      ARMProcClass(None), ARMArch(ARMv4t), HasV4TOps(false), HasV5TOps(false),
+      HasV5TEOps(false), HasV6Ops(false), HasV6MOps(false), HasV6KOps(false),
+      HasV6T2Ops(false), HasV7Ops(false), HasV8Ops(false), HasV8_1aOps(false),
+      HasV8_2aOps(false), HasV8MBaselineOps(false), HasV8MMainlineOps(false),
+      HasVFPv2(false), HasVFPv3(false), HasVFPv4(false), HasFPARMv8(false),
+      HasNEON(false), UseNEONForSinglePrecisionFP(false),
+      UseMulOps(UseFusedMulOps), SlowFPVMLx(false), HasVMLxForwarding(false),
+      SlowFPBrcc(false), InThumbMode(false), UseSoftFloat(false),
+      HasThumb2(false), NoARM(false), ReserveR9(false), NoMovt(false),
+      SupportsTailCall(false), HasFP16(false), HasFullFP16(false),
+      HasD16(false), HasHardwareDivide(false), HasHardwareDivideInARM(false),
+      HasT2ExtractPack(false), HasDataBarrier(false), HasV7Clrex(false),
+      HasAcquireRelease(false), Pref32BitThumb(false),
+      AvoidCPSRPartialUpdate(false), AvoidMOVsShifterOperand(false),
+      HasRetAddrStack(false), HasMPExtension(false), HasVirtualization(false),
+      FPOnlySP(false), HasPerfMon(false), HasTrustZone(false),
+      Has8MSecExt(false), HasCrypto(false), HasCRC(false), HasRAS(false),
+      HasZeroCycleZeroing(false), IsProfitableToUnpredicate(false),
+      HasSlowVGETLNi32(false), HasSlowVDUP32(false), PreferVMOVSR(false),
+      PreferISHST(false), UseNEONForFPMovs(false), StrictAlign(false),
+      RestrictIT(false), HasDSP(false), UseNaClTrap(false), GenLongCalls(false),
+      UnsafeFPMath(false), UseSjLjEH(false), stackAlignment(4), CPUString(CPU),
       IsLittle(IsLittle), TargetTriple(TT), Options(TM.Options), TM(TM),
       FrameLowering(initializeFrameLowering(CPU, FS)),
       // At this point initializeSubtargetDependencies has been called so
@@ -102,64 +124,6 @@ ARMSubtarget::ARMSubtarget(const Triple &TT, const std::string &CPU,
       TLInfo(TM, *this) {}
 
 void ARMSubtarget::initializeEnvironment() {
-  HasV4TOps = false;
-  HasV5TOps = false;
-  HasV5TEOps = false;
-  HasV6Ops = false;
-  HasV6MOps = false;
-  HasV6KOps = false;
-  HasV6T2Ops = false;
-  HasV7Ops = false;
-  HasV8Ops = false;
-  HasV8_1aOps = false;
-  HasV8_2aOps = false;
-  HasV8MBaselineOps = false;
-  HasV8MMainlineOps = false;
-  HasVFPv2 = false;
-  HasVFPv3 = false;
-  HasVFPv4 = false;
-  HasFPARMv8 = false;
-  HasNEON = false;
-  UseNEONForSinglePrecisionFP = false;
-  UseMulOps = UseFusedMulOps;
-  SlowFPVMLx = false;
-  HasVMLxForwarding = false;
-  SlowFPBrcc = false;
-  InThumbMode = false;
-  UseSoftFloat = false;
-  HasThumb2 = false;
-  NoARM = false;
-  ReserveR9 = false;
-  NoMovt = false;
-  SupportsTailCall = false;
-  HasFP16 = false;
-  HasFullFP16 = false;
-  HasD16 = false;
-  HasHardwareDivide = false;
-  HasHardwareDivideInARM = false;
-  HasT2ExtractPack = false;
-  HasDataBarrier = false;
-  Pref32BitThumb = false;
-  AvoidCPSRPartialUpdate = false;
-  AvoidMOVsShifterOperand = false;
-  HasRAS = false;
-  HasMPExtension = false;
-  HasVirtualization = false;
-  FPOnlySP = false;
-  HasPerfMon = false;
-  HasTrustZone = false;
-  Has8MSecExt = false;
-  HasCrypto = false;
-  HasCRC = false;
-  HasZeroCycleZeroing = false;
-  StrictAlign = false;
-  HasDSP = false;
-  UseNaClTrap = false;
-  GenLongCalls = false;
-  UnsafeFPMath = false;
-  HasV7Clrex = false;
-  HasAcquireRelease = false;
-
   // MCAsmInfo isn't always present (e.g. in opt) so we can't initialize this
   // directly from it, but we can try to make sure they're consistent when both
   // available.
@@ -273,40 +237,19 @@ bool ARMSubtarget::isAAPCS16_ABI() const {
   return TM.TargetABI == ARMBaseTargetMachine::ARM_ABI_AAPCS16;
 }
 
-
-/// GVIsIndirectSymbol - true if the GV will be accessed via an indirect symbol.
+/// true if the GV will be accessed via an indirect symbol.
 bool
 ARMSubtarget::GVIsIndirectSymbol(const GlobalValue *GV,
                                  Reloc::Model RelocM) const {
-  if (RelocM == Reloc::Static)
-    return false;
-
-  bool isDef = GV->isStrongDefinitionForLinker();
-
-  if (!isTargetMachO()) {
-    // Extra load is needed for all externally visible.
-    if (GV->hasLocalLinkage() || GV->hasHiddenVisibility())
-      return false;
+  if (!shouldAssumeDSOLocal(RelocM, TargetTriple, *GV->getParent(), GV))
     return true;
-  } else {
-    // If this is a strong reference to a definition, it is definitely not
-    // through a stub.
-    if (isDef)
-      return false;
 
-    // Unless we have a symbol with hidden visibility, we have to go through a
-    // normal $non_lazy_ptr stub because this symbol might be resolved late.
-    if (!GV->hasHiddenVisibility())  // Non-hidden $non_lazy_ptr reference.
-      return true;
-
-    if (RelocM == Reloc::PIC_) {
-      // If symbol visibility is hidden, we have a stub for common symbol
-      // references and external declarations.
-      if (GV->isDeclarationForLinker() || GV->hasCommonLinkage())
-        // Hidden $non_lazy_ptr reference.
-        return true;
-    }
-  }
+  // 32 bit macho has no relocation for a-b if a is undefined, even if b is in
+  // the section that is being relocated. This means we have to use o load even
+  // for GVs that are known to be local to the dso.
+  if (isTargetDarwin() && RelocM == Reloc::PIC_ &&
+      (GV->isDeclarationForLinker() || GV->hasCommonLinkage()))
+    return true;
 
   return false;
 }

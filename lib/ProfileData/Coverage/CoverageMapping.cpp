@@ -143,28 +143,30 @@ void CounterMappingContext::dump(const Counter &C,
   }
   if (CounterValues.empty())
     return;
-  ErrorOr<int64_t> Value = evaluate(C);
-  if (!Value)
+  Expected<int64_t> Value = evaluate(C);
+  if (auto E = Value.takeError()) {
+    llvm::consumeError(std::move(E));
     return;
+  }
   OS << '[' << *Value << ']';
 }
 
-ErrorOr<int64_t> CounterMappingContext::evaluate(const Counter &C) const {
+Expected<int64_t> CounterMappingContext::evaluate(const Counter &C) const {
   switch (C.getKind()) {
   case Counter::Zero:
     return 0;
   case Counter::CounterValueReference:
     if (C.getCounterID() >= CounterValues.size())
-      return make_error_code(errc::argument_out_of_domain);
+      return errorCodeToError(errc::argument_out_of_domain);
     return CounterValues[C.getCounterID()];
   case Counter::Expression: {
     if (C.getExpressionID() >= Expressions.size())
-      return make_error_code(errc::argument_out_of_domain);
+      return errorCodeToError(errc::argument_out_of_domain);
     const auto &E = Expressions[C.getExpressionID()];
-    ErrorOr<int64_t> LHS = evaluate(E.LHS);
+    Expected<int64_t> LHS = evaluate(E.LHS);
     if (!LHS)
       return LHS;
-    ErrorOr<int64_t> RHS = evaluate(E.RHS);
+    Expected<int64_t> RHS = evaluate(E.RHS);
     if (!RHS)
       return RHS;
     return E.Kind == CounterExpression::Subtract ? *LHS - *RHS : *LHS + *RHS;
@@ -181,7 +183,7 @@ void FunctionRecordIterator::skipOtherFiles() {
     *this = FunctionRecordIterator();
 }
 
-ErrorOr<std::unique_ptr<CoverageMapping>>
+Expected<std::unique_ptr<CoverageMapping>>
 CoverageMapping::load(CoverageMappingReader &CoverageReader,
                       IndexedInstrProfReader &ProfileReader) {
   auto Coverage = std::unique_ptr<CoverageMapping>(new CoverageMapping());
@@ -191,13 +193,14 @@ CoverageMapping::load(CoverageMappingReader &CoverageReader,
     CounterMappingContext Ctx(Record.Expressions);
 
     Counts.clear();
-    if (std::error_code EC = ProfileReader.getFunctionCounts(
+    if (Error E = ProfileReader.getFunctionCounts(
             Record.FunctionName, Record.FunctionHash, Counts)) {
-      if (EC == instrprof_error::hash_mismatch) {
+      instrprof_error IPE = InstrProfError::take(std::move(E));
+      if (IPE == instrprof_error::hash_mismatch) {
         Coverage->MismatchedFunctionCount++;
         continue;
-      } else if (EC != instrprof_error::unknown_function)
-        return EC;
+      } else if (IPE != instrprof_error::unknown_function)
+        return make_error<InstrProfError>(IPE);
       Counts.assign(Record.MappingRegions.size(), 0);
     }
     Ctx.setCounts(Counts);
@@ -212,9 +215,11 @@ CoverageMapping::load(CoverageMappingReader &CoverageReader,
           getFuncNameWithoutPrefix(OrigFuncName, Record.Filenames[0]);
     FunctionRecord Function(OrigFuncName, Record.Filenames);
     for (const auto &Region : Record.MappingRegions) {
-      ErrorOr<int64_t> ExecutionCount = Ctx.evaluate(Region.Count);
-      if (!ExecutionCount)
+      Expected<int64_t> ExecutionCount = Ctx.evaluate(Region.Count);
+      if (auto E = ExecutionCount.takeError()) {
+        llvm::consumeError(std::move(E));
         break;
+      }
       Function.pushRegion(Region, *ExecutionCount);
     }
     if (Function.CountedRegions.size() != Record.MappingRegions.size()) {
@@ -228,20 +233,22 @@ CoverageMapping::load(CoverageMappingReader &CoverageReader,
   return std::move(Coverage);
 }
 
-ErrorOr<std::unique_ptr<CoverageMapping>>
+Expected<std::unique_ptr<CoverageMapping>>
 CoverageMapping::load(StringRef ObjectFilename, StringRef ProfileFilename,
                       StringRef Arch) {
-  auto CounterMappingBuff = MemoryBuffer::getFileOrSTDIN(ObjectFilename);
-  if (std::error_code EC = CounterMappingBuff.getError())
-    return EC;
+  auto CounterMappingBufOrErr = MemoryBuffer::getFileOrSTDIN(ObjectFilename);
+  if (std::error_code EC = CounterMappingBufOrErr.getError())
+    return errorCodeToError(EC);
+  std::unique_ptr<MemoryBuffer> ObjectBuffer =
+      std::move(CounterMappingBufOrErr.get());
   auto CoverageReaderOrErr =
-      BinaryCoverageReader::create(CounterMappingBuff.get(), Arch);
-  if (std::error_code EC = CoverageReaderOrErr.getError())
-    return EC;
+      BinaryCoverageReader::create(*ObjectBuffer.get(), Arch);
+  if (Error E = CoverageReaderOrErr.takeError())
+    return std::move(E);
   auto CoverageReader = std::move(CoverageReaderOrErr.get());
   auto ProfileReaderOrErr = IndexedInstrProfReader::create(ProfileFilename);
-  if (auto EC = ProfileReaderOrErr.getError())
-    return EC;
+  if (Error E = ProfileReaderOrErr.takeError())
+    return std::move(E);
   auto ProfileReader = std::move(ProfileReaderOrErr.get());
   return load(*CoverageReader, *ProfileReader);
 }
@@ -334,13 +341,25 @@ class SegmentBuilder {
 
   /// Sort a nested sequence of regions from a single file.
   static void sortNestedRegions(MutableArrayRef<CountedRegion> Regions) {
-    std::sort(Regions.begin(), Regions.end(),
-              [](const CountedRegion &LHS, const CountedRegion &RHS) {
-                if (LHS.startLoc() == RHS.startLoc())
-                  // When LHS completely contains RHS, we sort LHS first.
-                  return RHS.endLoc() < LHS.endLoc();
-                return LHS.startLoc() < RHS.startLoc();
-              });
+    std::sort(Regions.begin(), Regions.end(), [](const CountedRegion &LHS,
+                                                 const CountedRegion &RHS) {
+      if (LHS.startLoc() != RHS.startLoc())
+        return LHS.startLoc() < RHS.startLoc();
+      if (LHS.endLoc() != RHS.endLoc())
+        // When LHS completely contains RHS, we sort LHS first.
+        return RHS.endLoc() < LHS.endLoc();
+      // If LHS and RHS cover the same area, we need to sort them according
+      // to their kinds so that the most suitable region will become "active"
+      // in combineRegions(). Because we accumulate counter values only from
+      // regions of the same kind as the first region of the area, prefer
+      // CodeRegion to ExpansionRegion and ExpansionRegion to SkippedRegion.
+      static_assert(coverage::CounterMappingRegion::CodeRegion <
+                            coverage::CounterMappingRegion::ExpansionRegion &&
+                        coverage::CounterMappingRegion::ExpansionRegion <
+                            coverage::CounterMappingRegion::SkippedRegion,
+                    "Unexpected order of region kind values");
+      return LHS.Kind < RHS.Kind;
+    });
   }
 
   /// Combine counts of regions which cover the same area.
@@ -360,15 +379,18 @@ class SegmentBuilder {
         continue;
       }
       // Merge duplicate region.
-      if (I->Kind != coverage::CounterMappingRegion::CodeRegion)
-        // Add counts only from CodeRegions.
-        continue;
-      if (Active->Kind == coverage::CounterMappingRegion::SkippedRegion)
-        // We have to overwrite SkippedRegions because of special handling
-        // of them in startSegment().
-        *Active = *I;
-      else
-        // Otherwise, just append the count.
+      // If CodeRegions and ExpansionRegions cover the same area, it's probably
+      // a macro which is fully expanded to another macro. In that case, we need
+      // to accumulate counts only from CodeRegions, or else the area will be
+      // counted twice.
+      // On the other hand, a macro may have a nested macro in its body. If the
+      // outer macro is used several times, the ExpansionRegion for the nested
+      // macro will also be added several times. These ExpansionRegions cover
+      // the same source locations and have to be combined to reach the correct
+      // value for that area.
+      // We add counts of the regions of the same kind as the active region
+      // to handle the both situations.
+      if (I->Kind == Active->Kind)
         Active->ExecutionCount += I->ExecutionCount;
     }
     return Regions.drop_back(std::distance(++Active, End));
@@ -518,27 +540,37 @@ CoverageMapping::getCoverageForExpansion(const ExpansionRecord &Expansion) {
 }
 
 namespace {
+std::string getCoverageMapErrString(coveragemap_error Err) {
+  switch (Err) {
+  case coveragemap_error::success:
+    return "Success";
+  case coveragemap_error::eof:
+    return "End of File";
+  case coveragemap_error::no_data_found:
+    return "No coverage data found";
+  case coveragemap_error::unsupported_version:
+    return "Unsupported coverage format version";
+  case coveragemap_error::truncated:
+    return "Truncated coverage data";
+  case coveragemap_error::malformed:
+    return "Malformed coverage data";
+  }
+  llvm_unreachable("A value of coveragemap_error has no message.");
+}
+
+// FIXME: This class is only here to support the transition to llvm::Error. It
+// will be removed once this transition is complete. Clients should prefer to
+// deal with the Error value directly, rather than converting to error_code.
 class CoverageMappingErrorCategoryType : public std::error_category {
   const char *name() const LLVM_NOEXCEPT override { return "llvm.coveragemap"; }
   std::string message(int IE) const override {
-    auto E = static_cast<coveragemap_error>(IE);
-    switch (E) {
-    case coveragemap_error::success:
-      return "Success";
-    case coveragemap_error::eof:
-      return "End of File";
-    case coveragemap_error::no_data_found:
-      return "No coverage data found";
-    case coveragemap_error::unsupported_version:
-      return "Unsupported coverage format version";
-    case coveragemap_error::truncated:
-      return "Truncated coverage data";
-    case coveragemap_error::malformed:
-      return "Malformed coverage data";
-    }
-    llvm_unreachable("A value of coveragemap_error has no message.");
+    return getCoverageMapErrString(static_cast<coveragemap_error>(IE));
   }
 };
+} // end anonymous namespace
+
+std::string CoverageMapError::message() const {
+  return getCoverageMapErrString(Err);
 }
 
 static ManagedStatic<CoverageMappingErrorCategoryType> ErrorCategory;
@@ -546,3 +578,5 @@ static ManagedStatic<CoverageMappingErrorCategoryType> ErrorCategory;
 const std::error_category &llvm::coverage::coveragemap_category() {
   return *ErrorCategory;
 }
+
+char CoverageMapError::ID = 0;
