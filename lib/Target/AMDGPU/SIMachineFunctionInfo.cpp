@@ -7,12 +7,11 @@
 //
 //===----------------------------------------------------------------------===//
 
-
 #include "SIMachineFunctionInfo.h"
 #include "AMDGPUSubtarget.h"
 #include "SIInstrInfo.h"
-#include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
+#include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/LLVMContext.h"
@@ -54,6 +53,8 @@ SIMachineFunctionInfo::SIMachineFunctionInfo(const MachineFunction &MF)
     ReturnsVoid(true),
     MaximumWorkGroupSize(0),
     DebuggerReservedVGPRCount(0),
+    DebuggerWorkGroupIDStackObjectIndices({{0, 0, 0}}),
+    DebuggerWorkItemIDStackObjectIndices({{0, 0, 0}}),
     LDSWaveSpillSize(0),
     PSInputEna(0),
     NumUserSGPRs(0),
@@ -92,16 +93,16 @@ SIMachineFunctionInfo::SIMachineFunctionInfo(const MachineFunction &MF)
     WorkItemIDX = true;
   }
 
-  if (F->hasFnAttribute("amdgpu-work-group-id-y"))
+  if (F->hasFnAttribute("amdgpu-work-group-id-y") || ST.debuggerEmitPrologue())
     WorkGroupIDY = true;
 
-  if (F->hasFnAttribute("amdgpu-work-group-id-z"))
+  if (F->hasFnAttribute("amdgpu-work-group-id-z") || ST.debuggerEmitPrologue())
     WorkGroupIDZ = true;
 
-  if (F->hasFnAttribute("amdgpu-work-item-id-y"))
+  if (F->hasFnAttribute("amdgpu-work-item-id-y") || ST.debuggerEmitPrologue())
     WorkItemIDY = true;
 
-  if (F->hasFnAttribute("amdgpu-work-item-id-z"))
+  if (F->hasFnAttribute("amdgpu-work-item-id-z") || ST.debuggerEmitPrologue())
     WorkItemIDZ = true;
 
   // X, XY, and XYZ are the only supported combinations, so make sure Y is
@@ -205,7 +206,6 @@ SIMachineFunctionInfo::SpilledReg SIMachineFunctionInfo::getSpilledReg (
     if (LaneVGPR == AMDGPU::NoRegister)
       // We have no VGPRs left for spilling SGPRs.
       return Spill;
-
 
     LaneVGPRs[LaneVGPRIdx] = LaneVGPR;
 

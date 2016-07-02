@@ -13,10 +13,8 @@
 //===----------------------------------------------------------------------===//
 
 #include "AMDGPUSubtarget.h"
-#include "AMDGPUCallLowering.h"
 #include "R600ISelLowering.h"
 #include "R600InstrInfo.h"
-#include "R600MachineScheduler.h"
 #include "SIFrameLowering.h"
 #include "SIISelLowering.h"
 #include "SIInstrInfo.h"
@@ -32,17 +30,6 @@ using namespace llvm;
 #define GET_SUBTARGETINFO_TARGET_DESC
 #define GET_SUBTARGETINFO_CTOR
 #include "AMDGPUGenSubtargetInfo.inc"
-
-#ifdef LLVM_BUILD_GLOBAL_ISEL
-namespace {
-struct AMDGPUGISelActualAccessor : public GISelAccessor {
-  std::unique_ptr<CallLowering> CallLoweringInfo;
-  const CallLowering *getCallLowering() const override {
-    return CallLoweringInfo.get();
-  }
-};
-} // End anonymous namespace.
-#endif
 
 AMDGPUSubtarget::~AMDGPUSubtarget() {}
 
@@ -101,10 +88,10 @@ AMDGPUSubtarget::AMDGPUSubtarget(const Triple &TT, StringRef GPU, StringRef FS,
     EnableXNACK(false),
     DebuggerInsertNops(false),
     DebuggerReserveRegs(false),
+    DebuggerEmitPrologue(false),
 
     EnableVGPRSpilling(false),
     EnablePromoteAlloca(false),
-    EnableIfCvt(true),
     EnableLoadStoreOpt(false),
     EnableUnsafeDSOffsetFolding(false),
     EnableSIScheduler(false),
@@ -202,17 +189,8 @@ SISubtarget::SISubtarget(const Triple &TT, StringRef GPU, StringRef FS,
   AMDGPUSubtarget(TT, GPU, FS, TM),
   InstrInfo(*this),
   FrameLowering(TargetFrameLowering::StackGrowsUp, getStackAlignment(), 0),
-  TLInfo(TM, *this) {
-#ifndef LLVM_BUILD_GLOBAL_ISEL
-  GISelAccessor *GISel = new GISelAccessor();
-#else
-  AMDGPUGISelActualAccessor *GISel =
-    new AMDGPUGISelActualAccessor();
-  GISel->CallLoweringInfo.reset(
-    new AMDGPUCallLowering(*getTargetLowering()));
-#endif
-  setGISelAccessor(*GISel);
-}
+  TLInfo(TM, *this),
+  GISel() {}
 
 unsigned R600Subtarget::getStackEntrySize() const {
   switch (getWavefrontSize()) {
@@ -228,9 +206,7 @@ unsigned R600Subtarget::getStackEntrySize() const {
 }
 
 void SISubtarget::overrideSchedPolicy(MachineSchedPolicy &Policy,
-                                          MachineInstr *begin,
-                                          MachineInstr *end,
-                                          unsigned NumRegionInstrs) const {
+                                      unsigned NumRegionInstrs) const {
   // Track register pressure so the scheduler can try to decrease
   // pressure once register usage is above the threshold defined by
   // SIRegisterInfo::getRegPressureSetLimit()

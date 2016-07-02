@@ -77,11 +77,11 @@ protected:
   bool EnableXNACK;
   bool DebuggerInsertNops;
   bool DebuggerReserveRegs;
+  bool DebuggerEmitPrologue;
 
   // Used as options.
   bool EnableVGPRSpilling;
   bool EnablePromoteAlloca;
-  bool EnableIfCvt;
   bool EnableLoadStoreOpt;
   bool EnableUnsafeDSOffsetFolding;
   bool EnableSIScheduler;
@@ -219,10 +219,6 @@ public:
 
   bool isPromoteAllocaEnabled() const {
     return EnablePromoteAlloca;
-  }
-
-  bool isIfCvtEnabled() const {
-    return EnableIfCvt;
   }
 
   bool unsafeDSOffsetFoldingEnabled() const {
@@ -373,7 +369,6 @@ public:
   }
 
   void overrideSchedPolicy(MachineSchedPolicy &Policy,
-                           MachineInstr *Begin, MachineInstr *End,
                            unsigned NumRegionInstrs) const override;
 
   bool isVGPRSpillingEnabled(const Function& F) const;
@@ -402,12 +397,21 @@ public:
     return EnableSIScheduler;
   }
 
+  bool debuggerSupported() const {
+    return debuggerInsertNops() && debuggerReserveRegs() &&
+      debuggerEmitPrologue();
+  }
+
   bool debuggerInsertNops() const {
     return DebuggerInsertNops;
   }
 
   bool debuggerReserveRegs() const {
     return DebuggerReserveRegs;
+  }
+
+  bool debuggerEmitPrologue() const {
+    return DebuggerEmitPrologue;
   }
 
   bool loadStoreOptEnabled() const {

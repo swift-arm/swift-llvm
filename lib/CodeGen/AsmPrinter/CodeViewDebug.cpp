@@ -20,6 +20,7 @@
 #include "llvm/DebugInfo/CodeView/TypeDumper.h"
 #include "llvm/DebugInfo/CodeView/TypeIndex.h"
 #include "llvm/DebugInfo/CodeView/TypeRecord.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/MC/MCExpr.h"
 #include "llvm/MC/MCSectionCOFF.h"
 #include "llvm/MC/MCSymbol.h"
@@ -155,6 +156,18 @@ static std::string getFullyQualifiedName(const DIScope *Scope, StringRef Name) {
   return getQualifiedName(QualifiedNameComponents, Name);
 }
 
+struct CodeViewDebug::TypeLoweringScope {
+  TypeLoweringScope(CodeViewDebug &CVD) : CVD(CVD) { ++CVD.TypeEmissionLevel; }
+  ~TypeLoweringScope() {
+    // Don't decrement TypeEmissionLevel until after emitting deferred types, so
+    // inner TypeLoweringScopes don't attempt to emit deferred types.
+    if (CVD.TypeEmissionLevel == 1)
+      CVD.emitDeferredCompleteTypes();
+    --CVD.TypeEmissionLevel;
+  }
+  CodeViewDebug &CVD;
+};
+
 TypeIndex CodeViewDebug::getScopeIndex(const DIScope *Scope) {
   // No scope means global scope and that uses the zero index.
   if (!Scope || isa<DIFile>(Scope))
@@ -212,16 +225,24 @@ TypeIndex CodeViewDebug::getFuncIdForSubprogram(const DISubprogram *SP) {
 
 TypeIndex CodeViewDebug::getMemberFunctionType(const DISubprogram *SP,
                                                const DICompositeType *Class) {
+  // Always use the method declaration as the key for the function type. The
+  // method declaration contains the this adjustment.
+  if (SP->getDeclaration())
+    SP = SP->getDeclaration();
+  assert(!SP->getDeclaration() && "should use declaration as key");
+
   // Key the MemberFunctionRecord into the map as {SP, Class}. It won't collide
   // with the MemberFuncIdRecord, which is keyed in as {SP, nullptr}.
-  auto I = TypeIndices.find({SP, nullptr});
+  auto I = TypeIndices.find({SP, Class});
   if (I != TypeIndices.end())
     return I->second;
 
-  // FIXME: Get the ThisAdjustment off of SP when it is available.
+  // Make sure complete type info for the class is emitted *after* the member
+  // function type, as the complete class type is likely to reference this
+  // member function type.
+  TypeLoweringScope S(*this);
   TypeIndex TI =
-      lowerTypeMemberFunction(SP->getType(), Class, /*ThisAdjustment=*/0);
-
+      lowerTypeMemberFunction(SP->getType(), Class, SP->getThisAdjustment());
   return recordTypeIndexForDINode(SP, TI, Class);
 }
 
@@ -504,8 +525,7 @@ void CodeViewDebug::emitInlinedCallSite(const FunctionInfo &FI,
 
   OS.EmitLabel(InlineEnd);
 
-  for (const LocalVariable &Var : Site.InlinedLocals)
-    emitLocalVariable(Var);
+  emitLocalVariableList(Site.InlinedLocals);
 
   // Recurse on child inlined call sites before closing the scope.
   for (const DILocation *ChildSite : Site.ChildSites) {
@@ -608,8 +628,7 @@ void CodeViewDebug::emitDebugInfoForFunction(const Function *GV,
     emitNullTerminatedSymbolName(OS, FuncName);
     OS.EmitLabel(ProcRecordEnd);
 
-    for (const LocalVariable &Var : FI.Locals)
-      emitLocalVariable(Var);
+    emitLocalVariableList(FI.Locals);
 
     // Emit inlined call site information. Only emit functions inlined directly
     // into the parent function. We'll emit the other sites recursively as part
@@ -1502,23 +1521,32 @@ CodeViewDebug::lowerRecordFieldList(const DICompositeType *Ty) {
   for (ClassInfo::MemberInfo &MemberInfo : Info.Members) {
     const DIDerivedType *Member = MemberInfo.MemberTypeNode;
     TypeIndex MemberBaseType = getTypeIndex(Member->getBaseType());
+    StringRef MemberName = Member->getName();
+    MemberAccess Access =
+        translateAccessFlags(Ty->getTag(), Member->getFlags());
 
     if (Member->isStaticMember()) {
-      Fields.writeStaticDataMember(StaticDataMemberRecord(
-          translateAccessFlags(Ty->getTag(), Member->getFlags()),
-          MemberBaseType, Member->getName()));
+      Fields.writeStaticDataMember(
+          StaticDataMemberRecord(Access, MemberBaseType, MemberName));
       MemberCount++;
       continue;
     }
 
-    uint64_t OffsetInBytes = MemberInfo.BaseOffset;
-
-    // FIXME: Handle bitfield type memeber.
-    OffsetInBytes += Member->getOffsetInBits() / 8;
-
-    Fields.writeDataMember(
-        DataMemberRecord(translateAccessFlags(Ty->getTag(), Member->getFlags()),
-                         MemberBaseType, OffsetInBytes, Member->getName()));
+    // Data member.
+    uint64_t MemberOffsetInBits = Member->getOffsetInBits();
+    if (Member->isBitField()) {
+      uint64_t StartBitOffset = MemberOffsetInBits;
+      if (const auto *CI =
+              dyn_cast_or_null<ConstantInt>(Member->getStorageOffsetInBits())) {
+        MemberOffsetInBits = CI->getZExtValue();
+      }
+      StartBitOffset -= MemberOffsetInBits;
+      MemberBaseType = TypeTable.writeBitField(BitFieldRecord(
+          MemberBaseType, Member->getSizeInBits(), StartBitOffset));
+    }
+    uint64_t MemberOffsetInBytes = MemberOffsetInBits / 8;
+    Fields.writeDataMember(DataMemberRecord(Access, MemberBaseType,
+                                            MemberOffsetInBytes, MemberName));
     MemberCount++;
   }
 
@@ -1574,18 +1602,6 @@ TypeIndex CodeViewDebug::getVBPTypeIndex() {
   return VBPType;
 }
 
-struct CodeViewDebug::TypeLoweringScope {
-  TypeLoweringScope(CodeViewDebug &CVD) : CVD(CVD) { ++CVD.TypeEmissionLevel; }
-  ~TypeLoweringScope() {
-    // Don't decrement TypeEmissionLevel until after emitting deferred types, so
-    // inner TypeLoweringScopes don't attempt to emit deferred types.
-    if (CVD.TypeEmissionLevel == 1)
-      CVD.emitDeferredCompleteTypes();
-    --CVD.TypeEmissionLevel;
-  }
-  CodeViewDebug &CVD;
-};
-
 TypeIndex CodeViewDebug::getTypeIndex(DITypeRef TypeRef, DITypeRef ClassTyRef) {
   const DIType *Ty = TypeRef.resolve();
   const DIType *ClassTy = ClassTyRef.resolve();
@@ -1601,14 +1617,9 @@ TypeIndex CodeViewDebug::getTypeIndex(DITypeRef TypeRef, DITypeRef ClassTyRef) {
   if (I != TypeIndices.end())
     return I->second;
 
-  TypeIndex TI;
-  {
-    TypeLoweringScope S(*this);
-    TI = lowerType(Ty, ClassTy);
-    recordTypeIndexForDINode(Ty, TI, ClassTy);
-  }
-
-  return TI;
+  TypeLoweringScope S(*this);
+  TypeIndex TI = lowerType(Ty, ClassTy);
+  return recordTypeIndexForDINode(Ty, TI, ClassTy);
 }
 
 TypeIndex CodeViewDebug::getCompleteTypeIndex(DITypeRef TypeRef) {
@@ -1678,6 +1689,25 @@ void CodeViewDebug::emitDeferredCompleteTypes() {
       getCompleteTypeIndex(RecordTy);
     TypesToEmit.clear();
   }
+}
+
+void CodeViewDebug::emitLocalVariableList(ArrayRef<LocalVariable> Locals) {
+  // Get the sorted list of parameters and emit them first.
+  SmallVector<const LocalVariable *, 6> Params;
+  for (const LocalVariable &L : Locals)
+    if (L.DIVar->isParameter())
+      Params.push_back(&L);
+  std::sort(Params.begin(), Params.end(),
+            [](const LocalVariable *L, const LocalVariable *R) {
+              return L->DIVar->getArg() < R->DIVar->getArg();
+            });
+  for (const LocalVariable *L : Params)
+    emitLocalVariable(*L);
+
+  // Next emit all non-parameters in the order that we found them.
+  for (const LocalVariable &L : Locals)
+    if (!L.DIVar->isParameter())
+      emitLocalVariable(L);
 }
 
 void CodeViewDebug::emitLocalVariable(const LocalVariable &Var) {

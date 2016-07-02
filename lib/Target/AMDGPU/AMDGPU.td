@@ -241,12 +241,6 @@ def FeatureEnableUnsafeDSOffsetFolding : SubtargetFeature <
   "Force using DS instruction immediate offsets on SI"
 >;
 
-def FeatureIfCvt : SubtargetFeature <"disable-ifcvt",
-  "EnableIfCvt",
-  "false",
-  "Disable the if conversion pass"
->;
-
 def FeatureEnableSIScheduler : SubtargetFeature<"si-scheduler",
   "EnableSIScheduler",
   "true",
@@ -327,6 +321,13 @@ def FeatureDebuggerReserveRegs : SubtargetFeature<
   "DebuggerReserveRegs",
   "true",
   "Reserve registers for debugger usage"
+>;
+
+def FeatureDebuggerEmitPrologue : SubtargetFeature<
+  "amdgpu-debugger-emit-prologue",
+  "DebuggerEmitPrologue",
+  "true",
+  "Emit debugger prologue"
 >;
 
 //===----------------------------------------------------------------------===//

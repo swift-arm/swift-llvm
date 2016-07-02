@@ -562,7 +562,8 @@ void ARMAsmPrinter::EmitEndOfAsmFile(Module &M) {
   ARMTargetStreamer &ATS = static_cast<ARMTargetStreamer &>(TS);
 
   if (OptimizationGoals > 0 &&
-      (Subtarget->isTargetAEABI() || Subtarget->isTargetGNUAEABI()))
+      (Subtarget->isTargetAEABI() || Subtarget->isTargetGNUAEABI() ||
+       Subtarget->isTargetMuslAEABI()))
     ATS.emitAttribute(ARMBuildAttrs::ABI_optimization_goals, OptimizationGoals);
   OptimizationGoals = -1;
 
@@ -611,10 +612,6 @@ static ARMBuildAttrs::CPUArch getArchForCPU(StringRef CPU,
     return ARMBuildAttrs::v4T;
   else
     return ARMBuildAttrs::v4;
-}
-
-bool ARMAsmPrinter::isPositionIndependent() const {
-  return TM.getRelocationModel() == Reloc::PIC_;
 }
 
 void ARMAsmPrinter::emitAttributes() {
@@ -913,8 +910,8 @@ getModifierVariantKind(ARMCP::ARMCPModifier Modifier) {
 MCSymbol *ARMAsmPrinter::GetARMGVSymbol(const GlobalValue *GV,
                                         unsigned char TargetFlags) {
   if (Subtarget->isTargetMachO()) {
-    bool IsIndirect = (TargetFlags & ARMII::MO_NONLAZY) &&
-      Subtarget->GVIsIndirectSymbol(GV, TM.getRelocationModel());
+    bool IsIndirect =
+        (TargetFlags & ARMII::MO_NONLAZY) && Subtarget->isGVIndirectSymbol(GV);
 
     if (!IsIndirect)
       return getSymbol(GV);

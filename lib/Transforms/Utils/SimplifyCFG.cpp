@@ -1083,13 +1083,10 @@ bool SimplifyCFGOpt::FoldValueComparisonIntoPredecessors(TerminatorInst *TI,
 
         // If there are any constants vectored to BB that TI doesn't handle,
         // they must go to the default destination of TI.
-        for (std::set<ConstantInt *, ConstantIntOrdering>::iterator
-                 I = PTIHandled.begin(),
-                 E = PTIHandled.end();
-             I != E; ++I) {
+        for (ConstantInt *I : PTIHandled) {
           if (PredHasWeights || SuccHasWeights)
-            Weights.push_back(WeightsForHandled[*I]);
-          PredCases.push_back(ValueEqualityComparisonCase(*I, BBDefault));
+            Weights.push_back(WeightsForHandled[I]);
+          PredCases.push_back(ValueEqualityComparisonCase(I, BBDefault));
           NewSuccessors.push_back(BBDefault);
         }
       }
@@ -1885,14 +1882,19 @@ static bool FoldCondBranchOnPHI(BranchInst *BI, const DataLayout &DL) {
 
       // Check for trivial simplification.
       if (Value *V = SimplifyInstruction(N, DL)) {
-        TranslateMap[&*BBI] = V;
-        delete N; // Instruction folded away, don't need actual inst
+        if (!BBI->use_empty())
+          TranslateMap[&*BBI] = V;
+        if (!N->mayHaveSideEffects()) {
+          delete N; // Instruction folded away, don't need actual inst
+          N = nullptr;
+        }
       } else {
-        // Insert the new instruction into its new home.
-        EdgeBB->getInstList().insert(InsertPt, N);
         if (!BBI->use_empty())
           TranslateMap[&*BBI] = N;
       }
+      // Insert the new instruction into its new home.
+      if (N)
+        EdgeBB->getInstList().insert(InsertPt, N);
     }
 
     // Loop over all of the edges from PredBB to BB, changing them to branch
@@ -2145,8 +2147,8 @@ static bool SimplifyCondBranchToTwoReturns(BranchInst *BI,
 static bool checkCSEInPredecessor(Instruction *Inst, BasicBlock *PB) {
   if (!isa<BinaryOperator>(Inst) && !isa<CmpInst>(Inst))
     return false;
-  for (BasicBlock::iterator I = PB->begin(), E = PB->end(); I != E; I++) {
-    Instruction *PBI = &*I;
+  for (Instruction &I : *PB) {
+    Instruction *PBI = &I;
     // Check whether Inst and PBI generate the same value.
     if (Inst->isIdenticalTo(PBI)) {
       Inst->replaceAllUsesWith(PBI);
@@ -2460,9 +2462,9 @@ bool llvm::FoldBranchToCommonDest(BranchInst *BI, unsigned BonusInstThreshold) {
     // could replace PBI's branch probabilities with BI's.
 
     // Copy any debug value intrinsics into the end of PredBlock.
-    for (BasicBlock::iterator I = BB->begin(), E = BB->end(); I != E; ++I)
-      if (isa<DbgInfoIntrinsic>(*I))
-        I->clone()->insertBefore(PBI);
+    for (Instruction &I : *BB)
+      if (isa<DbgInfoIntrinsic>(I))
+        I.clone()->insertBefore(PBI);
 
     return true;
   }
@@ -5383,7 +5385,7 @@ static bool passingValueIsAlwaysUndefined(Value *V, Instruction *I) {
   if (I->use_empty())
     return false;
 
-  if (C->isNullValue()) {
+  if (C->isNullValue() || isa<UndefValue>(C)) {
     // Only look at the first use, avoid hurting compile time with long uselists
     User *Use = *I->user_begin();
 
@@ -5412,6 +5414,10 @@ static bool passingValueIsAlwaysUndefined(Value *V, Instruction *I) {
       if (!SI->isVolatile())
         return SI->getPointerAddressSpace() == 0 &&
                SI->getPointerOperand() == I;
+
+    // A call to null is undefined.
+    if (auto CS = CallSite(Use))
+      return CS.getCalledValue() == I;
   }
   return false;
 }

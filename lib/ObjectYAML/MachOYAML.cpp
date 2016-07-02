@@ -91,12 +91,45 @@ void MappingTraits<MachOYAML::Object>::mapping(IO &IO,
   // For Fat files there will be a different tag so they can be differentiated.
   if (!IO.getContext()) {
     IO.setContext(&Object);
-    IO.mapTag("!mach-o", true);
   }
+  IO.mapTag("!mach-o", true);
   IO.mapRequired("FileHeader", Object.Header);
   IO.mapOptional("LoadCommands", Object.LoadCommands);
   IO.mapOptional("LinkEditData", Object.LinkEdit);
-  IO.setContext(nullptr);
+
+  if (IO.getContext() == &Object)
+    IO.setContext(nullptr);
+}
+
+void MappingTraits<MachOYAML::FatHeader>::mapping(
+    IO &IO, MachOYAML::FatHeader &FatHeader) {
+  IO.mapRequired("magic", FatHeader.magic);
+  IO.mapRequired("nfat_arch", FatHeader.nfat_arch);
+}
+
+void MappingTraits<MachOYAML::FatArch>::mapping(IO &IO,
+                                                MachOYAML::FatArch &FatArch) {
+  IO.mapRequired("cputype", FatArch.cputype);
+  IO.mapRequired("cpusubtype", FatArch.cpusubtype);
+  IO.mapRequired("offset", FatArch.offset);
+  IO.mapRequired("size", FatArch.size);
+  IO.mapRequired("align", FatArch.align);
+  IO.mapOptional("reserved", FatArch.reserved,
+                 static_cast<llvm::yaml::Hex32>(0));
+}
+
+void MappingTraits<MachOYAML::UniversalBinary>::mapping(
+    IO &IO, MachOYAML::UniversalBinary &UniversalBinary) {
+  if (!IO.getContext()) {
+    IO.setContext(&UniversalBinary);
+    IO.mapTag("!fat-mach-o", true);
+  }
+  IO.mapRequired("FatHeader", UniversalBinary.Header);
+  IO.mapRequired("FatArchs", UniversalBinary.FatArchs);
+  IO.mapRequired("Slices", UniversalBinary.Slices);
+
+  if (IO.getContext() == &UniversalBinary)
+    IO.setContext(nullptr);
 }
 
 void MappingTraits<MachOYAML::LinkEditData>::mapping(
