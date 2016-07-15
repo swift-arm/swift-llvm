@@ -28,6 +28,7 @@
 #include "llvm/Support/Format.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/Process.h"
+#include "llvm/Support/ThreadPool.h"
 #include <functional>
 #include <system_error>
 
@@ -48,6 +49,15 @@ public:
   /// \brief Print the error message to the error output stream.
   void error(const Twine &Message, StringRef Whence = "");
 
+  /// \brief Record (but do not print) an error message in a thread-safe way.
+  void deferError(const Twine &Message, StringRef Whence = "");
+
+  /// \brief Record (but do not print) a warning message in a thread-safe way.
+  void deferWarning(const Twine &Message, StringRef Whence = "");
+
+  /// \brief Print (and then clear) all deferred error and warning messages.
+  void consumeDeferredMessages();
+
   /// \brief Append a reference to a private copy of \p Path into SourceFiles.
   void addCollectedPath(const std::string &Path);
 
@@ -57,17 +67,18 @@ public:
   /// \brief Create source views for the expansions of the view.
   void attachExpansionSubViews(SourceCoverageView &View,
                                ArrayRef<ExpansionRecord> Expansions,
-                               CoverageMapping &Coverage);
+                               const CoverageMapping &Coverage);
 
   /// \brief Create the source view of a particular function.
   std::unique_ptr<SourceCoverageView>
-  createFunctionView(const FunctionRecord &Function, CoverageMapping &Coverage);
+  createFunctionView(const FunctionRecord &Function,
+                     const CoverageMapping &Coverage);
 
   /// \brief Create the main source view of a particular source file.
   std::unique_ptr<SourceCoverageView>
-  createSourceFileView(StringRef SourceFile, CoverageMapping &Coverage);
+  createSourceFileView(StringRef SourceFile, const CoverageMapping &Coverage);
 
-  /// \brief Load the coverage mapping data. Return true if an error occured.
+  /// \brief Load the coverage mapping data. Return nullptr if an error occured.
   std::unique_ptr<CoverageMapping> load();
 
   int run(Command Cmd, int argc, const char **argv);
@@ -85,22 +96,51 @@ public:
   std::string PGOFilename;
   CoverageFiltersMatchAll Filters;
   std::vector<StringRef> SourceFiles;
-  std::vector<std::pair<std::string, std::unique_ptr<MemoryBuffer>>>
-      LoadedSourceFiles;
   bool CompareFilenamesOnly;
   StringMap<std::string> RemappedFilenames;
   std::string CoverageArch;
 
 private:
   std::vector<std::string> CollectedPaths;
+
+  std::mutex DeferredMessagesLock;
+  std::vector<std::string> DeferredMessages;
+
+  std::mutex LoadedSourceFilesLock;
+  std::vector<std::pair<std::string, std::unique_ptr<MemoryBuffer>>>
+      LoadedSourceFiles;
 };
 }
 
-void CodeCoverageTool::error(const Twine &Message, StringRef Whence) {
-  errs() << "error: ";
+static std::string getErrorString(const Twine &Message, StringRef Whence,
+                                  bool Warning) {
+  std::string Str = (Warning ? "warning" : "error");
+  Str += ": ";
   if (!Whence.empty())
-    errs() << Whence << ": ";
-  errs() << Message << "\n";
+    Str += Whence.str() + ": ";
+  Str += Message.str() + "\n";
+  return Str;
+}
+
+void CodeCoverageTool::error(const Twine &Message, StringRef Whence) {
+  errs() << getErrorString(Message, Whence, false);
+}
+
+void CodeCoverageTool::deferError(const Twine &Message, StringRef Whence) {
+  std::unique_lock<std::mutex> Guard{DeferredMessagesLock};
+  DeferredMessages.emplace_back(getErrorString(Message, Whence, false));
+}
+
+void CodeCoverageTool::deferWarning(const Twine &Message, StringRef Whence) {
+  std::unique_lock<std::mutex> Guard{DeferredMessagesLock};
+  DeferredMessages.emplace_back(getErrorString(Message, Whence, true));
+}
+
+void CodeCoverageTool::consumeDeferredMessages() {
+  std::unique_lock<std::mutex> Guard{DeferredMessagesLock};
+  for (const std::string &Message : DeferredMessages)
+    ViewOpts.colored_ostream(errs(), raw_ostream::RED) << Message;
+  DeferredMessages.clear();
 }
 
 void CodeCoverageTool::addCollectedPath(const std::string &Path) {
@@ -111,6 +151,7 @@ void CodeCoverageTool::addCollectedPath(const std::string &Path) {
 ErrorOr<const MemoryBuffer &>
 CodeCoverageTool::getSourceFile(StringRef SourceFile) {
   // If we've remapped filenames, look up the real location for this file.
+  std::unique_lock<std::mutex> Guard{LoadedSourceFilesLock};
   if (!RemappedFilenames.empty()) {
     auto Loc = RemappedFilenames.find(SourceFile);
     if (Loc != RemappedFilenames.end())
@@ -121,17 +162,16 @@ CodeCoverageTool::getSourceFile(StringRef SourceFile) {
       return *Files.second;
   auto Buffer = MemoryBuffer::getFile(SourceFile);
   if (auto EC = Buffer.getError()) {
-    error(EC.message(), SourceFile);
+    deferError(EC.message(), SourceFile);
     return EC;
   }
   LoadedSourceFiles.emplace_back(SourceFile, std::move(Buffer.get()));
   return *LoadedSourceFiles.back().second;
 }
 
-void
-CodeCoverageTool::attachExpansionSubViews(SourceCoverageView &View,
-                                          ArrayRef<ExpansionRecord> Expansions,
-                                          CoverageMapping &Coverage) {
+void CodeCoverageTool::attachExpansionSubViews(
+    SourceCoverageView &View, ArrayRef<ExpansionRecord> Expansions,
+    const CoverageMapping &Coverage) {
   if (!ViewOpts.ShowExpandedRegions)
     return;
   for (const auto &Expansion : Expansions) {
@@ -153,7 +193,7 @@ CodeCoverageTool::attachExpansionSubViews(SourceCoverageView &View,
 
 std::unique_ptr<SourceCoverageView>
 CodeCoverageTool::createFunctionView(const FunctionRecord &Function,
-                                     CoverageMapping &Coverage) {
+                                     const CoverageMapping &Coverage) {
   auto FunctionCoverage = Coverage.getCoverageForFunction(Function);
   if (FunctionCoverage.empty())
     return nullptr;
@@ -171,7 +211,7 @@ CodeCoverageTool::createFunctionView(const FunctionRecord &Function,
 
 std::unique_ptr<SourceCoverageView>
 CodeCoverageTool::createSourceFileView(StringRef SourceFile,
-                                       CoverageMapping &Coverage) {
+                                       const CoverageMapping &Coverage) {
   auto SourceBuffer = getSourceFile(SourceFile);
   if (!SourceBuffer)
     return nullptr;
@@ -184,7 +224,7 @@ CodeCoverageTool::createSourceFileView(StringRef SourceFile,
                                          ViewOpts, std::move(FileCoverage));
   attachExpansionSubViews(*View, Expansions, Coverage);
 
-  for (auto Function : Coverage.getInstantiations(SourceFile)) {
+  for (const auto *Function : Coverage.getInstantiations(SourceFile)) {
     auto SubViewCoverage = Coverage.getCoverageForFunction(*Function);
     auto SubViewExpansions = SubViewCoverage.getExpansions();
     auto SubView =
@@ -272,6 +312,8 @@ int CodeCoverageTool::run(Command Cmd, int argc, const char **argv) {
       "format", cl::desc("Output format for line-based coverage reports"),
       cl::values(clEnumValN(CoverageViewOptions::OutputFormat::Text, "text",
                             "Text output"),
+                 clEnumValN(CoverageViewOptions::OutputFormat::HTML, "html",
+                            "HTML output"),
                  clEnumValEnd),
       cl::init(CoverageViewOptions::OutputFormat::Text));
 
@@ -332,6 +374,11 @@ int CodeCoverageTool::run(Command Cmd, int argc, const char **argv) {
       ViewOpts.Colors = UseColor == cl::BOU_UNSET
                             ? sys::Process::StandardOutHasColors()
                             : UseColor == cl::BOU_TRUE;
+      break;
+    case CoverageViewOptions::OutputFormat::HTML:
+      if (UseColor == cl::BOU_FALSE)
+        error("Color output cannot be disabled when generating html.");
+      ViewOpts.Colors = true;
       break;
     }
 
@@ -457,7 +504,7 @@ int CodeCoverageTool::show(int argc, const char **argv,
   if (!Filters.empty()) {
     auto OSOrErr = Printer->createViewFile("functions", /*InToplevel=*/true);
     if (Error E = OSOrErr.takeError()) {
-      error(toString(std::move(E)));
+      error("Could not create view file!", toString(std::move(E)));
       return 1;
     }
     auto OS = std::move(OSOrErr.get());
@@ -493,30 +540,41 @@ int CodeCoverageTool::show(int argc, const char **argv,
   // Create an index out of the source files.
   if (ViewOpts.hasOutputDirectory()) {
     if (Error E = Printer->createIndexFile(SourceFiles)) {
-      error(toString(std::move(E)));
+      error("Could not create index file!", toString(std::move(E)));
       return 1;
     }
   }
 
-  for (const auto &SourceFile : SourceFiles) {
-    auto mainView = createSourceFileView(SourceFile, *Coverage);
-    if (!mainView) {
-      ViewOpts.colored_ostream(errs(), raw_ostream::RED)
-          << "warning: The file '" << SourceFile << "' isn't covered.";
-      errs() << "\n";
-      continue;
-    }
+  // In -output-dir mode, it's safe to use multiple threads to print files.
+  unsigned ThreadCount = 1;
+  if (ViewOpts.hasOutputDirectory())
+    ThreadCount = std::thread::hardware_concurrency();
+  ThreadPool Pool(ThreadCount);
 
-    auto OSOrErr = Printer->createViewFile(SourceFile, /*InToplevel=*/false);
-    if (Error E = OSOrErr.takeError()) {
-      error(toString(std::move(E)));
-      return 1;
-    }
-    auto OS = std::move(OSOrErr.get());
-    mainView->print(*OS.get(), /*Wholefile=*/true,
-                    /*ShowSourceName=*/ShowFilenames);
-    Printer->closeViewFile(std::move(OS));
+  for (StringRef SourceFile : SourceFiles) {
+    Pool.async([this, SourceFile, &Coverage, &Printer, ShowFilenames] {
+      auto View = createSourceFileView(SourceFile, *Coverage);
+      if (!View) {
+        deferWarning("The file '" + SourceFile.str() + "' isn't covered.");
+        return;
+      }
+
+      auto OSOrErr = Printer->createViewFile(SourceFile, /*InToplevel=*/false);
+      if (Error E = OSOrErr.takeError()) {
+        deferError("Could not create view file!", toString(std::move(E)));
+        return;
+      }
+      auto OS = std::move(OSOrErr.get());
+
+      View->print(*OS.get(), /*Wholefile=*/true,
+                  /*ShowSourceName=*/ShowFilenames);
+      Printer->closeViewFile(std::move(OS));
+    });
   }
+
+  Pool.wait();
+
+  consumeDeferredMessages();
 
   return 0;
 }
@@ -526,6 +584,9 @@ int CodeCoverageTool::report(int argc, const char **argv,
   auto Err = commandLineParser(argc, argv);
   if (Err)
     return Err;
+
+  if (ViewOpts.Format == CoverageViewOptions::OutputFormat::HTML)
+    error("HTML output for summary reports is not yet supported.");
 
   auto Coverage = load();
   if (!Coverage)

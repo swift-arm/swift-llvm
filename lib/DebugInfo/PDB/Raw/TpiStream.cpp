@@ -66,7 +66,7 @@ TpiStream::~TpiStream() {}
 
 // Corresponds to `fUDTAnon`.
 template <typename T> static bool isAnonymous(T &Rec) {
-  StringRef Name = Rec.getUniqueName();
+  StringRef Name = Rec.getName();
   return Name == "<unnamed-tag>" || Name == "__unnamed" ||
       Name.endswith("::<unnamed-tag>") || Name.endswith("::__unnamed");
 }
@@ -269,3 +269,5 @@ iterator_range<CVTypeArray::Iterator>
 TpiStream::types(bool *HadError) const {
   return llvm::make_range(TypeRecords.begin(HadError), TypeRecords.end());
 }
+
+Error TpiStream::commit() { return Error::success(); }
